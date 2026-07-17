@@ -24,7 +24,7 @@ ios:
 	@$(NVM); npm run ios
 
 typecheck:
-	@$(NVM); npx tsc --noEmit
+	@$(NVM); node --stack-size=8000 ./node_modules/typescript/lib/tsc.js --noEmit
 
 lint:
 	@$(NVM); npm run lint

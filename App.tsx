@@ -1,12 +1,24 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { View } from "react-native";
+import { Pressable, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as Clipboard from "expo-clipboard";
+import { Check, Clipboard as ClipboardIcon } from "lucide-react-native";
 
 import "./global.css";
 import { Button } from "@/components/ui/button";
 import { Text } from "@/components/ui/text";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Icon } from "@/components/ui/icon";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { generateKey, isValidKey } from "@/auth/key";
 import { useSession } from "@/auth/session";
 import { getStoredKey, setStoredKey } from "@/auth/storage";
@@ -33,32 +45,36 @@ function Auth({ onAuthenticated }: { onAuthenticated: (key: string) => void }) {
   const [view, setView] = useState<AuthView>("landing");
 
   if (view === "register") {
-    return <Register onDone={onAuthenticated} onBack={() => setView("landing")} />;
+    return <Register onBack={() => setView("landing")} onLogin={() => setView("login")} />;
   }
   if (view === "login") {
     return <Login onDone={onAuthenticated} onBack={() => setView("landing")} />;
   }
   return (
     <Screen>
-      <Text variant="h1">Sana</Text>
-      <View className="w-64 gap-3">
-        <Button onPress={() => setView("register")}>
-          <Text>Register</Text>
-        </Button>
-        <Button variant="outline" onPress={() => setView("login")}>
-          <Text>Login</Text>
-        </Button>
+      <View className="w-full max-w-sm items-center gap-10">
+        <Text className="text-foreground text-5xl font-bold tracking-tight">
+          Sana
+        </Text>
+        <View className="w-full gap-3">
+          <Button onPress={() => setView("register")}>
+            <Text>Register</Text>
+          </Button>
+          <Button variant="outline" onPress={() => setView("login")}>
+            <Text>Login</Text>
+          </Button>
+        </View>
       </View>
     </Screen>
   );
 }
 
 function Register({
-  onDone,
   onBack,
+  onLogin,
 }: {
-  onDone: (key: string) => void;
   onBack: () => void;
+  onLogin: () => void;
 }) {
   const [key] = useState(generateKey);
   const [copied, setCopied] = useState(false);
@@ -67,6 +83,7 @@ function Register({
   async function copy() {
     await Clipboard.setStringAsync(key);
     setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   }
 
   async function store() {
@@ -76,35 +93,52 @@ function Register({
 
   return (
     <Screen>
-      <Text variant="h2">Your key</Text>
-      <Text variant="muted" className="max-w-xs text-center">
-        This key is your only way to log in. It is never stored on our servers.
-        Save it somewhere safe.
-      </Text>
-      <View className="w-64 rounded-lg border border-border bg-card p-3">
-        <Text selectable className="font-mono text-xs">
-          {key}
-        </Text>
-      </View>
-      <View className="w-64 gap-3">
-        <Button variant="outline" onPress={copy}>
-          <Text>{copied ? "Copied" : "Copy key"}</Text>
-        </Button>
-        <Button variant="outline" onPress={store}>
-          <Text>{stored ? "Stored on this device" : "Store on this device"}</Text>
-        </Button>
-        {canDownload() && (
-          <Button variant="outline" onPress={() => downloadKey(key)}>
-            <Text>Download key</Text>
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>Your key</CardTitle>
+          <CardDescription>
+            This key is your only way to log in. It is never stored on our
+            servers — save it somewhere safe.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="gap-4">
+          <View className="border-border bg-muted relative rounded-md border p-3 pr-11">
+            <Text selectable className="font-mono text-xs">
+              {key}
+            </Text>
+            <Pressable
+              onPress={copy}
+              hitSlop={8}
+              accessibilityLabel="Copy key"
+              className="active:bg-background absolute right-1 top-1 rounded-md p-2"
+            >
+              <Icon
+                as={copied ? Check : ClipboardIcon}
+                size={18}
+                className="text-muted-foreground"
+              />
+            </Pressable>
+          </View>
+          <View className="gap-2">
+            <Button variant="outline" onPress={store}>
+              <Text>{stored ? "Stored on this device" : "Store on this device"}</Text>
+            </Button>
+            {canDownload() && (
+              <Button variant="outline" onPress={() => downloadKey(key)}>
+                <Text>Download key</Text>
+              </Button>
+            )}
+          </View>
+        </CardContent>
+        <CardFooter className="gap-3">
+          <Button className="flex-1" variant="ghost" onPress={onBack}>
+            <Text>Back</Text>
           </Button>
-        )}
-        <Button onPress={() => onDone(key)}>
-          <Text>Continue</Text>
-        </Button>
-        <Button variant="link" onPress={onBack}>
-          <Text>Back</Text>
-        </Button>
-      </View>
+          <Button className="flex-1" onPress={onLogin}>
+            <Text>Login</Text>
+          </Button>
+        </CardFooter>
+      </Card>
     </Screen>
   );
 }
@@ -116,45 +150,59 @@ function Login({
   onDone: (key: string) => void;
   onBack: () => void;
 }) {
+  const [entry, setEntry] = useState("");
   const [savedKey, setSavedKey] = useState<string | null>(null);
-  const [checked, setChecked] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getStoredKey().then((stored) => {
-      setSavedKey(stored);
-      setChecked(true);
-    });
+    getStoredKey().then(setSavedKey);
   }, []);
 
-  const hasSavedKey = savedKey !== null && isValidKey(savedKey);
-
-  function loginFromDevice() {
-    if (savedKey && isValidKey(savedKey)) {
-      onDone(savedKey);
-    } else {
-      setError("No saved key on this device.");
+  function submitEntry() {
+    const trimmed = entry.trim();
+    if (!isValidKey(trimmed)) {
+      setError("That does not look like a valid key.");
+      return;
     }
+    onDone(trimmed);
   }
 
   return (
     <Screen>
-      <Text variant="h2">Log in</Text>
-      {error && <Text className="text-destructive">{error}</Text>}
-      <View className="w-64 gap-3">
-        <Button onPress={loginFromDevice} disabled={!hasSavedKey}>
-          <Text>Log in with saved key</Text>
-        </Button>
-        <Button variant="link" onPress={onBack}>
-          <Text>Back</Text>
-        </Button>
-      </View>
-      {checked && !hasSavedKey && (
-        <Text variant="muted" className="max-w-xs text-center text-sm">
-          No saved key on this device. Register to create one. Logging in from a
-          key file is coming next.
-        </Text>
-      )}
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>Log in</CardTitle>
+        </CardHeader>
+        <CardContent className="gap-4">
+          <View className="gap-1.5">
+            <Label>Your key</Label>
+            <Input
+              value={entry}
+              onChangeText={(text) => {
+                setEntry(text);
+                setError(null);
+              }}
+              placeholder="Paste your key"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+          </View>
+          {error && <Text className="text-destructive text-sm">{error}</Text>}
+          <Button onPress={submitEntry}>
+            <Text>Log in</Text>
+          </Button>
+          {savedKey && isValidKey(savedKey) && (
+            <Button variant="outline" onPress={() => onDone(savedKey)}>
+              <Text>Use saved key</Text>
+            </Button>
+          )}
+        </CardContent>
+        <CardFooter>
+          <Button className="flex-1" variant="ghost" onPress={onBack}>
+            <Text>Back</Text>
+          </Button>
+        </CardFooter>
+      </Card>
     </Screen>
   );
 }
@@ -168,25 +216,29 @@ function Home({
 }) {
   return (
     <Screen>
-      <Text variant="h1">Sana</Text>
-      <Text variant="muted">You are logged in.</Text>
-      <View className="w-64 gap-3">
-        {canDownload() && (
-          <Button variant="outline" onPress={onDownload}>
-            <Text>Download key</Text>
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>Sana</CardTitle>
+          <CardDescription>You are logged in.</CardDescription>
+        </CardHeader>
+        <CardContent className="gap-3">
+          {canDownload() && (
+            <Button variant="outline" onPress={onDownload}>
+              <Text>Download key</Text>
+            </Button>
+          )}
+          <Button variant="secondary" onPress={onLogout}>
+            <Text>Log out</Text>
           </Button>
-        )}
-        <Button onPress={onLogout}>
-          <Text>Log out</Text>
-        </Button>
-      </View>
+        </CardContent>
+      </Card>
     </Screen>
   );
 }
 
 function Screen({ children }: { children: ReactNode }) {
   return (
-    <View className="flex-1 items-center justify-center gap-6 bg-background px-6">
+    <View className="bg-background flex-1 items-center justify-center px-6">
       {children}
     </View>
   );
