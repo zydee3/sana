@@ -1,0 +1,31 @@
+[project]
+name = "sana-scraper"
+version = "0.1.0"
+description = "Builds Sana's research corpus: pulls open-access papers into a store the backend reads."
+requires-python = ">=3.12"
+# No runtime deps by design: stdlib urllib/json/xml cover HTTP + parsing.
+dependencies = []
+
+[dependency-groups]
+dev = ["ruff>=0.6", "mypy>=1.11", "pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scraper"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
