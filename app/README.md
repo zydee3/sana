@@ -8,6 +8,7 @@ A wellness companion — a health chat app where you talk with an AI companion. 
 Requires Node >= 22 on PATH (install however you like — apt, brew, nvm, ...).
 
 ```bash
+make setup      # install dependencies
 make web        # web dev server (http://localhost:8081)
 make ios        # iOS dev server (needs macOS / simulator)
 make build      # bundle web to dist/

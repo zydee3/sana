@@ -1,10 +1,13 @@
 # Sana app task runner. Requires Node >= 22 on PATH (see package.json engines);
 # how it gets there (apt, nvm, brew, ...) is the machine's business, not the repo's.
 
-.PHONY: help node-check install web ios typecheck lint test build check docker deploy
+.PHONY: all help node-check setup web ios typecheck lint test build check clean docker deploy
+
+# Default: build the artifact (web bundle). `make help` lists everything.
+all: build
 
 help:
-	@echo "make install    - install dependencies"
+	@echo "make setup      - install dependencies (npm install)"
 	@echo "make web        - run the web dev server (http://localhost:8081)"
 	@echo "make ios        - run the iOS dev server (needs macOS/simulator)"
 	@echo "make typecheck  - tsc --noEmit"
@@ -12,6 +15,7 @@ help:
 	@echo "make test       - vitest run"
 	@echo "make build      - export the web bundle to dist/"
 	@echo "make check      - typecheck + lint + test + build"
+	@echo "make clean      - remove build outputs (dist/, .expo/)"
 	@echo "make docker     - build the sana-app image (web bundle served by nginx)"
 	@echo "make deploy     - build, then deploy web (host not configured yet)"
 
@@ -20,7 +24,7 @@ node-check:
 	[ -n "$$v" ] && [ "$$v" -ge 22 ] || \
 	  { echo "Error: Node >= 22 required (found: $$(node -v 2>/dev/null || echo none))"; exit 1; }
 
-install: node-check
+setup: node-check
 	npm install
 
 web: node-check
@@ -42,6 +46,9 @@ build: node-check
 	npx expo export --platform web
 
 check: typecheck lint test build
+
+clean:
+	rm -rf dist .expo
 
 docker:
 	docker build -t sana-app .

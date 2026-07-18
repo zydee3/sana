@@ -11,27 +11,18 @@ make build      # build the sana-server image
 make deploy     # build + import into k3s + kubectl apply deploy.yaml
 ```
 
-## One-time setup (per machine)
+## Prerequisites
 
-Nothing in this repo is machine-specific; each host provides two things under fixed names:
+docker, k3s, and Claude Code logged in on the host (`~/.claude/.credentials.json`). That's it —
+`make deploy` handles everything else on first run:
 
-1. **`/sana-data`** — server state (the ciphertext chat DB) mounts from here. Create a
-   directory, or symlink it to any disk. It must be writable by UID 1000 (the container user).
+- **`/sana-data`** — server state (the ciphertext chat DB) mounts from here; created if missing
+  (writable by UID 1000, the container user). To place it on a specific disk, symlink it before
+  the first deploy: `sudo ln -s /path/on/some/disk /sana-data`.
+- **`claude-credentials` secret** — created from `~/.claude/.credentials.json` if missing.
 
-   ```bash
-   sudo mkdir /sana-data && sudo chown 1000 /sana-data
-   # or: sudo ln -s /path/on/some/disk /sana-data
-   ```
-
-2. **`claude-credentials` secret** — Claude Code credentials, created from your own login:
-
-   ```bash
-   sudo k3s kubectl create secret generic claude-credentials \
-     --from-file=$HOME/.claude/.credentials.json
-   ```
-
-The hosted/GA deployment will authenticate with Sana's own API key (env var) instead of
-personal credentials.
+Nothing in this repo is machine-specific. The hosted/GA deployment will authenticate with
+Sana's own API key (env var) instead of personal credentials.
 
 ## Notes
 
