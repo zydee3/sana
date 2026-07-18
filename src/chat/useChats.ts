@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
-import * as Crypto from "expo-crypto";
+import { useCallback, useEffect, useState } from 'react';
+import * as Crypto from 'expo-crypto';
 
-import type { Chat, Message } from "./types";
-import { loadChats, saveChats } from "./storage";
+import type { Chat, Message } from './types';
+import { loadChats, saveChats } from './storage';
 
 // Placeholder assistant reply. Real replies will come from the claude -p backend,
 // which is not connected yet.
@@ -24,7 +24,7 @@ export function useChats() {
     const now = Date.now();
     const chat: Chat = {
       id: Crypto.randomUUID(),
-      title: "New chat",
+      title: 'New chat',
       messages: [],
       createdAt: now,
       updatedAt: now,
@@ -44,13 +44,13 @@ export function useChats() {
       const now = Date.now();
       const userMessage: Message = {
         id: Crypto.randomUUID(),
-        role: "user",
+        role: 'user',
         content,
         createdAt: now,
       };
       const assistantMessage: Message = {
         id: Crypto.randomUUID(),
-        role: "assistant",
+        role: 'assistant',
         content: PLACEHOLDER_REPLY,
         createdAt: now + 1,
       };
@@ -70,7 +70,7 @@ export function useChats() {
 }
 
 function deriveTitle(text: string): string {
-  const clean = text.trim().replace(/\s+/g, " ");
-  if (!clean) return "New chat";
+  const clean = text.trim().replace(/\s+/g, ' ');
+  if (!clean) return 'New chat';
   return clean.length > 40 ? `${clean.slice(0, 40)}…` : clean;
 }

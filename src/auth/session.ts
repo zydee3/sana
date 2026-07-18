@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState } from 'react';
 
 // In-memory session. The key is held only in state; persisting it to the device
 // is a separate explicit action (the "Store on this device" button). No auto-login.

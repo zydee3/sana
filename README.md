@@ -13,6 +13,8 @@ make ios        # iOS dev server (needs macOS / simulator)
 make build      # bundle web to dist/
 make typecheck
 make lint
+make test       # vitest
+make check      # typecheck + lint + test + build
 ```
 
 `make` sets the Node version for you. Without it, activate Node 22 first (`nvm use 22`), then use

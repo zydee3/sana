@@ -66,7 +66,8 @@
     "prettier": "^3.2.5",
     "prettier-plugin-tailwindcss": "^0.5.11",
     "tailwindcss": "^3.4.0",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.10"
   },
   "main": "node_modules/expo/AppEntry.js",
   "private": true

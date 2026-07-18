@@ -1,16 +1,10 @@
-import { useState } from "react";
+import { useState } from 'react';
 
-import { useChats } from "./useChats";
-import { ChatListScreen } from "./ChatListScreen";
-import { ChatScreen } from "./ChatScreen";
+import { useChats } from './useChats';
+import { ChatListScreen } from './ChatListScreen';
+import { ChatScreen } from './ChatScreen';
 
-export function Main({
-  sessionKey,
-  onLogout,
-}: {
-  sessionKey: string;
-  onLogout: () => void;
-}) {
+export function Main({ sessionKey, onLogout }: { sessionKey: string; onLogout: () => void }) {
   const { chats, loaded, createChat, sendMessage } = useChats();
   const [openChatId, setOpenChatId] = useState<string | null>(null);
 

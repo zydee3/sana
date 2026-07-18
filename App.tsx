@@ -1,59 +1,53 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Modal, Pressable, View } from "react-native";
-import { SafeAreaProvider } from "react-native-safe-area-context";
-import { StatusBar } from "expo-status-bar";
-import * as Clipboard from "expo-clipboard";
-import { Check, Clipboard as ClipboardIcon } from "lucide-react-native";
+import { useEffect, useState, type ReactNode } from 'react';
+import { Modal, Pressable, View } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
+import * as Clipboard from 'expo-clipboard';
+import { Check, Clipboard as ClipboardIcon } from 'lucide-react-native';
 
-import "./global.css";
-import { Button } from "@/components/ui/button";
-import { Text } from "@/components/ui/text";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Icon } from "@/components/ui/icon";
-import { generateKey, isValidKey } from "@/auth/key";
-import { useSession } from "@/auth/session";
-import { clearStoredKey, getStoredKey, setStoredKey } from "@/auth/storage";
-import { canDownload, downloadKey } from "@/auth/download";
-import { Main } from "@/chat/Main";
+import './global.css';
+import { Button } from '@/components/ui/button';
+import { Text } from '@/components/ui/text';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Icon } from '@/components/ui/icon';
+import { generateKey, isValidKey } from '@/auth/key';
+import { useSession } from '@/auth/session';
+import { clearStoredKey, getStoredKey, setStoredKey } from '@/auth/storage';
+import { canDownload, downloadKey } from '@/auth/download';
+import { Main } from '@/chat/Main';
 
 export default function App() {
   const { key, login, logout } = useSession();
 
   return (
     <SafeAreaProvider>
-      {key ? (
-        <Main sessionKey={key} onLogout={logout} />
-      ) : (
-        <Auth onAuthenticated={login} />
-      )}
+      {key ? <Main sessionKey={key} onLogout={logout} /> : <Auth onAuthenticated={login} />}
       <StatusBar style="auto" />
     </SafeAreaProvider>
   );
 }
 
-type AuthView = "landing" | "register" | "login";
+type AuthView = 'landing' | 'register' | 'login';
 
 function Auth({ onAuthenticated }: { onAuthenticated: (key: string) => void }) {
-  const [view, setView] = useState<AuthView>("landing");
+  const [view, setView] = useState<AuthView>('landing');
 
-  if (view === "register") {
-    return <Register onBack={() => setView("landing")} onLogin={() => setView("login")} />;
+  if (view === 'register') {
+    return <Register onBack={() => setView('landing')} onLogin={() => setView('login')} />;
   }
-  if (view === "login") {
-    return <Login onDone={onAuthenticated} onBack={() => setView("landing")} />;
+  if (view === 'login') {
+    return <Login onDone={onAuthenticated} onBack={() => setView('landing')} />;
   }
   return (
     <Screen>
       <View className="w-full max-w-sm items-center gap-10">
-        <Text className="text-foreground text-5xl font-bold tracking-tight">
-          Sana
-        </Text>
+        <Text className="text-5xl font-bold tracking-tight text-foreground">Sana</Text>
         <View className="w-full gap-3">
-          <Button onPress={() => setView("register")}>
+          <Button onPress={() => setView('register')}>
             <Text>Register</Text>
           </Button>
-          <Button variant="outline" onPress={() => setView("login")}>
+          <Button variant="outline" onPress={() => setView('login')}>
             <Text>Login</Text>
           </Button>
         </View>
@@ -62,13 +56,7 @@ function Auth({ onAuthenticated }: { onAuthenticated: (key: string) => void }) {
   );
 }
 
-function Register({
-  onBack,
-  onLogin,
-}: {
-  onBack: () => void;
-  onLogin: () => void;
-}) {
+function Register({ onBack, onLogin }: { onBack: () => void; onLogin: () => void }) {
   const [key] = useState(generateKey);
   const [copied, setCopied] = useState(false);
   const [stored, setStored] = useState(false);
@@ -87,15 +75,13 @@ function Register({
   return (
     <Screen>
       <View className="w-full max-w-sm items-center gap-8">
-        <Text className="text-foreground text-5xl font-bold tracking-tight">
-          Register
-        </Text>
+        <Text className="text-5xl font-bold tracking-tight text-foreground">Register</Text>
         <View className="w-full gap-4">
-          <Text className="text-muted-foreground text-center">
-            This key is your only way to log in. It is never stored on our
-            servers — save it somewhere safe.
+          <Text className="text-center text-muted-foreground">
+            This key is your only way to log in. It is never stored on our servers — save it
+            somewhere safe.
           </Text>
-          <View className="border-border bg-muted relative rounded-md border p-3 pr-11">
+          <View className="relative rounded-md border border-border bg-muted p-3 pr-11">
             <Text selectable className="font-mono text-xs">
               {key}
             </Text>
@@ -103,8 +89,7 @@ function Register({
               onPress={copy}
               hitSlop={8}
               accessibilityLabel="Copy key"
-              className="active:bg-background absolute right-1 top-1 rounded-md p-2"
-            >
+              className="absolute right-1 top-1 rounded-md p-2 active:bg-background">
               <Icon
                 as={copied ? Check : ClipboardIcon}
                 size={18}
@@ -114,7 +99,7 @@ function Register({
           </View>
           <View className="gap-2">
             <Button variant="outline" onPress={store}>
-              <Text>{stored ? "Stored on this device" : "Store on this device"}</Text>
+              <Text>{stored ? 'Stored on this device' : 'Store on this device'}</Text>
             </Button>
             {canDownload() && (
               <Button variant="outline" onPress={() => downloadKey(key)}>
@@ -136,14 +121,8 @@ function Register({
   );
 }
 
-function Login({
-  onDone,
-  onBack,
-}: {
-  onDone: (key: string) => void;
-  onBack: () => void;
-}) {
-  const [entry, setEntry] = useState("");
+function Login({ onDone, onBack }: { onDone: (key: string) => void; onBack: () => void }) {
+  const [entry, setEntry] = useState('');
   const [savedKey, setSavedKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showClear, setShowClear] = useState(false);
@@ -157,7 +136,7 @@ function Login({
   function submitEntry() {
     const trimmed = entry.trim();
     if (!isValidKey(trimmed)) {
-      setError("That does not look like a valid key.");
+      setError('That does not look like a valid key.');
       return;
     }
     onDone(trimmed);
@@ -172,9 +151,7 @@ function Login({
   return (
     <Screen>
       <View className="w-full max-w-sm items-center gap-8">
-        <Text className="text-foreground text-5xl font-bold tracking-tight">
-          Login
-        </Text>
+        <Text className="text-5xl font-bold tracking-tight text-foreground">Login</Text>
         <View className="w-full gap-4">
           <View className="gap-1.5">
             <Label>Your key</Label>
@@ -191,7 +168,7 @@ function Login({
               returnKeyType="send"
             />
           </View>
-          {error && <Text className="text-destructive text-sm">{error}</Text>}
+          {error && <Text className="text-sm text-destructive">{error}</Text>}
           <Button onPress={submitEntry}>
             <Text>Log in</Text>
           </Button>
@@ -206,11 +183,7 @@ function Login({
               <Text>Back</Text>
             </Button>
             {hasSavedKey && (
-              <Button
-                className="flex-1"
-                variant="ghost"
-                onPress={() => setShowClear(true)}
-              >
+              <Button className="flex-1" variant="ghost" onPress={() => setShowClear(true)}>
                 <Text className="text-destructive">Clear saved key</Text>
               </Button>
             )}
@@ -227,13 +200,7 @@ function Login({
   );
 }
 
-function SavedKeyButton({
-  hasKey,
-  onUse,
-}: {
-  hasKey: boolean;
-  onUse: () => void;
-}) {
+function SavedKeyButton({ hasKey, onUse }: { hasKey: boolean; onUse: () => void }) {
   const [showHint, setShowHint] = useState(false);
 
   if (hasKey) {
@@ -248,12 +215,12 @@ function SavedKeyButton({
     <View className="relative">
       {showHint && (
         <View className="absolute bottom-full left-0 right-0 mb-2 items-center">
-          <View className="bg-foreground max-w-[15rem] rounded-md px-3 py-2">
-            <Text className="text-background text-center text-sm">
+          <View className="max-w-[15rem] rounded-md bg-foreground px-3 py-2">
+            <Text className="text-center text-sm text-background">
               No key is saved on this device.
             </Text>
           </View>
-          <View className="border-x-[6px] border-t-[6px] border-x-transparent border-t-foreground h-0 w-0" />
+          <View className="h-0 w-0 border-x-[6px] border-t-[6px] border-x-transparent border-t-foreground" />
         </View>
       )}
       <Button
@@ -261,8 +228,7 @@ function SavedKeyButton({
         className="opacity-50"
         onHoverIn={() => setShowHint(true)}
         onHoverOut={() => setShowHint(false)}
-        onPress={() => setShowHint(true)}
-      >
+        onPress={() => setShowHint(true)}>
         <Text>Use saved key</Text>
       </Button>
     </View>
@@ -282,18 +248,14 @@ function ClearKeyDialog({
 }) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable
-        className="flex-1 items-center justify-center bg-black/50 px-6"
-        onPress={onClose}
-      >
+      <Pressable className="flex-1 items-center justify-center bg-black/50 px-6" onPress={onClose}>
         <Pressable
-          className="border-border bg-card w-full max-w-sm gap-3 rounded-lg border p-5"
-          onPress={() => {}}
-        >
+          className="w-full max-w-sm gap-3 rounded-lg border border-border bg-card p-5"
+          onPress={() => {}}>
           <Text className="text-lg font-semibold">Clear saved key?</Text>
           <Text className="text-muted-foreground">
-            This removes the key saved on this device. You'll need it to log in
-            again, so download it first if you haven't saved it elsewhere.
+            This removes the key saved on this device. You&apos;ll need it to log in again, so
+            download it first if you haven&apos;t saved it elsewhere.
           </Text>
           {canDownload() && keyValue && (
             <Button variant="outline" onPress={() => downloadKey(keyValue)}>
@@ -315,9 +277,5 @@ function ClearKeyDialog({
 }
 
 function Screen({ children }: { children: ReactNode }) {
-  return (
-    <View className="bg-background flex-1 items-center justify-center px-6">
-      {children}
-    </View>
-  );
+  return <View className="flex-1 items-center justify-center bg-background px-6">{children}</View>;
 }

@@ -1,4 +1,4 @@
-import * as Crypto from "expo-crypto";
+import * as Crypto from 'expo-crypto';
 
 // The login credential is 256 bits of random material, encoded as hex.
 // Generated client-side, never sent to a server. Hex (not base64) keeps
@@ -16,7 +16,7 @@ export function isValidKey(value: string): boolean {
 }
 
 function bytesToHex(bytes: Uint8Array): string {
-  let hex = "";
-  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+  let hex = '';
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
   return hex;
 }

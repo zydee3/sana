@@ -3,7 +3,7 @@
 
 NVM := export NVM_DIR="$$HOME/.nvm"; . "$$NVM_DIR/nvm.sh"; nvm use 22 >/dev/null
 
-.PHONY: help install web ios typecheck lint build deploy
+.PHONY: help install web ios typecheck lint test build check deploy
 
 help:
 	@echo "make install    - install dependencies"
@@ -11,7 +11,9 @@ help:
 	@echo "make ios        - run the iOS dev server (needs macOS/simulator)"
 	@echo "make typecheck  - tsc --noEmit"
 	@echo "make lint       - eslint + prettier check"
+	@echo "make test       - vitest run"
 	@echo "make build      - export the web bundle to dist/"
+	@echo "make check      - typecheck + lint + test + build"
 	@echo "make deploy     - build, then deploy web (host not configured yet)"
 
 install:
@@ -29,8 +31,13 @@ typecheck:
 lint:
 	@$(NVM); npm run lint
 
+test:
+	@$(NVM); npx vitest run
+
 build:
 	@$(NVM); npx expo export --platform web
+
+check: typecheck lint test build
 
 deploy: build
 	@echo "Web bundle built to dist/."

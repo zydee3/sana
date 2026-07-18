@@ -1,4 +1,4 @@
-import { Platform } from "react-native";
+import { Platform } from 'react-native';
 
 // Downloading the key as a file is web-only (uses the browser DOM). On native,
 // saving to a file is a separate flow (expo-sharing) that is not built yet.
@@ -19,17 +19,17 @@ type WebGlobals = {
 };
 
 export function canDownload(): boolean {
-  return Platform.OS === "web";
+  return Platform.OS === 'web';
 }
 
 export function downloadKey(key: string): void {
-  if (Platform.OS !== "web") return;
+  if (Platform.OS !== 'web') return;
   const web = globalThis as unknown as WebGlobals;
-  const blob = new web.Blob([key], { type: "text/plain" });
+  const blob = new web.Blob([key], { type: 'text/plain' });
   const url = web.URL.createObjectURL(blob);
-  const anchor = web.document.createElement("a");
+  const anchor = web.document.createElement('a');
   anchor.href = url;
-  anchor.download = "sana-key.txt";
+  anchor.download = 'sana-key.txt';
   anchor.click();
   web.URL.revokeObjectURL(url);
 }
