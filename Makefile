@@ -1,46 +1,15 @@
-# Sana task runner.
-# Wraps npm/expo and pins Node 22 via nvm — the system Node is 18 and cannot run Expo.
+# Monorepo task runner. Each project owns its build system (app/Makefile, ...);
+# this file only delegates — projects will eventually ship as separate containers.
 
-NVM := export NVM_DIR="$$HOME/.nvm"; . "$$NVM_DIR/nvm.sh"; nvm use 22 >/dev/null
-
-.PHONY: help install web ios typecheck lint test build check deploy
+.PHONY: help check app-%
 
 help:
-	@echo "make install    - install dependencies"
-	@echo "make web        - run the web dev server (http://localhost:8081)"
-	@echo "make ios        - run the iOS dev server (needs macOS/simulator)"
-	@echo "make typecheck  - tsc --noEmit"
-	@echo "make lint       - eslint + prettier check"
-	@echo "make test       - vitest run"
-	@echo "make build      - export the web bundle to dist/"
-	@echo "make check      - typecheck + lint + test + build"
-	@echo "make deploy     - build, then deploy web (host not configured yet)"
+	@echo "make check      - run every project's check gate (currently: app)"
+	@echo "make app-<t>    - run target <t> in app/ (make app-web, make app-check, ...)"
+	@echo "projects: app/ (Expo web+iOS) · scraper/ (Python, not built)"
 
-install:
-	@$(NVM); npm install
+check:
+	@$(MAKE) -C app check
 
-web:
-	@$(NVM); npm run web
-
-ios:
-	@$(NVM); npm run ios
-
-typecheck:
-	@$(NVM); node --stack-size=8000 ./node_modules/typescript/lib/tsc.js --noEmit
-
-lint:
-	@$(NVM); npm run lint
-
-test:
-	@$(NVM); npx vitest run
-
-build:
-	@$(NVM); npx expo export --platform web
-
-check: typecheck lint test build
-
-deploy: build
-	@echo "Web bundle built to dist/."
-	@echo "Deploy target not configured. Choose a host (EAS Hosting / Netlify / Vercel)"
-	@echo "and it gets wired here. iOS distribution is a separate eas build/submit flow."
-	@exit 1
+app-%:
+	@$(MAKE) -C app $*
