@@ -5,7 +5,7 @@ A wellness companion — a health chat app where you talk with an AI companion. 
 
 ## Run
 
-Requires Node 22.
+Requires Node >= 22 on PATH (install however you like — apt, brew, nvm, ...).
 
 ```bash
 make web        # web dev server (http://localhost:8081)
@@ -15,10 +15,11 @@ make typecheck
 make lint
 make test       # vitest
 make check      # typecheck + lint + test + build
+make docker     # build the sana-app image (web bundle served by nginx)
 ```
 
-`make` sets the Node version for you. Without it, activate Node 22 first (`nvm use 22`), then use
-the `npm run web` / `npm run ios` scripts directly.
+`make` fails fast with a clear message if Node is missing or too old; the `npm run web` /
+`npm run ios` scripts work directly too.
 
 ## How it works
 

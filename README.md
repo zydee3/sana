@@ -11,12 +11,14 @@ its own container:
 - `scraper/` — Python ingester that collects research papers into the corpus the AI draws on.
   Not built yet.
 - `server/` — the backend (TypeScript/Node): decrypts chats in memory, retrieves from the
-  corpus, calls Claude Code headless, returns replies. Not built yet.
+  corpus, calls Claude Code headless, returns replies. Container runtime exists (Claude Code
+  image); the pipeline itself is not built. See `server/README.md`.
 
 ## Common tasks
 
 ```bash
 make check      # every project's check gate
+make docker     # every project's image (sana-app, sana-server)
 make app-web    # any app/ target: app-web, app-ios, app-check, ...
 ```
 

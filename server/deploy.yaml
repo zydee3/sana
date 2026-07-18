@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sana-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sana-server
+  template:
+    metadata:
+      labels:
+        app: sana-server
+    spec:
+      containers:
+        - name: server
+          image: docker.io/library/sana-server:latest
+          imagePullPolicy: Never # image is imported into containerd, never pulled
+          command: ["sleep", "infinity"] # placeholder until the pipeline server exists
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: claude-credentials
+              mountPath: /home/node/.claude/.credentials.json
+              subPath: .credentials.json
+              readOnly: true
+      volumes:
+        # /sana-data is the fixed host-side location on every machine; make it a
+        # directory or a symlink to the disk of your choice (one-time setup, README).
+        - name: data
+          hostPath:
+            path: /sana-data
+            type: Directory
+        - name: claude-credentials
+          secret:
+            secretName: claude-credentials

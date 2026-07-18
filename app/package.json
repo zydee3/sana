@@ -1,6 +1,9 @@
 {
   "name": "sana",
   "version": "1.0.0",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "android": "expo start --android",
     "ios": "expo start --ios",
