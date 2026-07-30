@@ -1,4 +1,4 @@
-"""CLI: pull open-access research PDFs into the corpus.
+"""CLI: pull open-access research papers (plain text) into the corpus.
 
 python -m scraper "mindfulness anxiety"        # pull one paper
 python -m scraper "sleep quality" -n 3         # pull up to three
@@ -39,12 +39,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skip  {p.pmcid}  (already in corpus)")
             continue
         try:
-            url, data = pmc_oa.download_pdf(p.pmcid)
+            url, text = pmc_oa.download_text(p.pmcid)
         except LookupError as e:
             print(f"miss  {p.pmcid}  ({e})")
             continue
-        path = corpus.save(corpus_dir, p, url, data)
-        print(f"saved {p.pmcid}  {len(data) // 1024} KB  -> {path}")
+        path = corpus.save(corpus_dir, p, url, text)
+        print(f"saved {p.pmcid}  {len(text)} chars  -> {path}")
         print(f"      {p.title}")
     return 0
 

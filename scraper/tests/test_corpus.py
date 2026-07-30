@@ -13,16 +13,18 @@ PAPER = Paper(
     license="cc by-nc",
 )
 
+TEXT = "Title\n==========\nBody of the article."
+
 
 def test_save_and_dedupe(tmp_path: Path) -> None:
     assert corpus.has(tmp_path, PAPER.pmcid) is False
 
-    pdf_path = corpus.save(tmp_path, PAPER, "https://example/PMC7739073.pdf", b"%PDF-fake")
+    txt_path = corpus.save(tmp_path, PAPER, "https://example/PMC7739073.txt", TEXT)
 
-    assert pdf_path.read_bytes() == b"%PDF-fake"
+    assert txt_path.read_text(encoding="utf-8") == TEXT
     assert corpus.has(tmp_path, PAPER.pmcid) is True
 
     meta = json.loads((tmp_path / "PMC7739073.json").read_text())
     assert meta["license"] == "cc by-nc"
-    assert meta["pdf_url"] == "https://example/PMC7739073.pdf"
-    assert meta["bytes"] == len(b"%PDF-fake")
+    assert meta["source_url"] == "https://example/PMC7739073.txt"
+    assert meta["chars"] == len(TEXT)
