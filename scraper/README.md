@@ -1,45 +1,61 @@
 # scraper
 
-Python ingester that builds Sana's research corpus: it collects open-access scientific papers
-(wellness / health) and lands them in a store the backend retrieves from, so the AI's replies
-are grounded in published research.
+Python crawler that builds Sana's research corpus: it discovers open-access scientific papers
+(mental health / wellness, broadly), judges what is worth keeping, and lands graded plain-text
+articles in a store the backend retrieves from, so the AI's replies are grounded in published
+research. Design: `../docs/crawler.md` (what and why), `../docs/crawler-impl.md` (how).
 
 The seam with the rest of Sana is **data, not code**: the scraper writes the corpus, the backend
 reads it. The corpus is public data — it sits outside the per-user encryption boundary.
 
-## What's built (walking skeleton)
+## What's built (crawler v1)
 
-Pull one open-access paper's PDF by search query:
+A topic-queue worker. Anyone enqueues a topic; the worker drains the queue, one pipeline pass
+per topic: discover → gate → triage → fetch → store → citation expansion.
 
 ```bash
-make setup                           # uv sync (creates the venv, installs dev tools)
-make run QUERY="mindfulness anxiety"  # -> ./corpus/PMC*.pdf + PMC*.json
-make run QUERY="sleep quality" ARGS="-n 3"
-make check                           # ruff + mypy + pytest (the verification gate)
+make setup                                    # uv sync (creates the venv, installs dev tools)
+make run ARGS='add-topic "sleep and adolescents" --openalex-topic T10272'
+make run ARGS='run --once'                    # drain the queue, then exit
+make run ARGS='run'                           # keep polling (the service mode)
+make check                                    # ruff + mypy + pytest (the verification gate)
 ```
 
-Each paper lands as `corpus/<pmcid>.pdf` plus a `corpus/<pmcid>.json` sidecar (pmcid, title,
-doi, authors, year, **license**, source URL). Re-running skips papers already in the corpus.
+Config (env): `SANA_CORPUS` (corpus root, default `./corpus`), `CLAUDE_BIN` (path to the
+claude CLI, default `claude` on PATH), `OPENALEX_API_KEY` (raises the free OpenAlex budget
+10x), `POLL_SECONDS`, `RECRAWL_DAYS`.
 
-### How it fetches
+### The pipeline
 
-1. **Discovery** — Europe PMC search API, filtered to `IN_EPMC:Y AND OPEN_ACCESS:Y`, gives the
-   PMCID and metadata.
-2. **Fetch** — the PMC open-access dataset on AWS (`pmc-oa-opendata` S3 bucket), keyed per paper
-   at `PMC<id>.<version>/`, serves the PDF over plain HTTPS.
+1. **Discover** — OpenAlex works filtered by the topic's OpenAlex topic id (1 credit/page;
+   the API is metered), plus Europe PMC search with `FIRST_IDATE` windows as the incremental
+   mechanism. Watermark per topic; re-crawls only see new work.
+2. **Gate** — retracted papers are excluded; non-open-access rejected. Every candidate becomes
+   a `works` row (kept, rejected, or missed) so re-crawls never re-judge old papers.
+3. **Triage** — Claude judges relevance + study type from title/abstract, batched through
+   **Claude Code headless** (`claude -p`, the same runtime as the backend), so it uses the
+   operator's existing Claude credentials — no separate metered API key. Study type maps to
+   evidence grade 1 (meta-analysis) .. 5 (case report/opinion), a retrieval weight, never a
+   drop reason. Without the claude CLI, or on a failed call, papers keep metadata-derived
+   grades / defer to the next pass.
+4. **Fetch** — PMC OA bucket plain text first (needs a PMCID, joined from the DOI via Europe
+   PMC — OpenAlex no longer carries PMCIDs), then Europe PMC `fullTextXML`; neither → the work
+   is kept as metadata-only (`kept_miss`) and retried on later passes.
+5. **Store** — `corpus/texts/<work_id>.txt` + a row in `corpus/corpus.db` (SQLite, WAL):
+   identity across sources, provenance, grade, misses, watermarks.
+6. **Expand** — depth-1 citation walk (citers + references via OpenAlex) from kept works,
+   bounded per pass, through the same gate.
 
-This path avoids Europe PMC's `?pdf=render` endpoint (returning 404s as of 2026-07-18) and NCBI
-FTP (blocked in many environments). No API key required.
-
-Runtime dependencies: **none** — the standard library (`urllib`, `json`, `xml`) covers HTTP and
-parsing. Dev tools (ruff, mypy, pytest) are managed by `uv`.
+Python dependencies: **none** — the standard library (`urllib`, `sqlite3`, `subprocess`,
+`json`, `xml`) covers HTTP, storage, and parsing. Triage shells out to the `claude` CLI
+(optional at runtime; the pipeline degrades to metadata grades without it). Dev tools
+(ruff, mypy, pytest) are managed by `uv`.
 
 ## Not built yet
 
-- **Scraping vs. crawling**: this pulls papers you name via a query. Continuous / automated
-  crawling (seed → expand by citation or topic, incrementally, on a schedule) is the next step —
-  the effective crawl algorithm is still to be designed.
-- Corpus store beyond flat PDFs (a queryable index / schema), and its own container.
+- Topic taxonomy contents (the human-reviewed seed list; topics are enqueued by hand today).
+- Own container + k3s Deployment (runs as a CLI; the image will need the claude CLI + mounted
+  credentials, like sana-server; the backend will enqueue topics by inserting into the shared
+  SQLite `topics` table).
+- Text normalization beyond the sources' own extraction; a queryable index beyond SQLite.
 - Chunking / embedding is owned by the backend's retrieval side, not here.
-- Only papers whose PDF exists in the PMC OA bucket are retrieved; full-text XML fallback and
-  other sources (OpenAlex, Semantic Scholar) are not wired in.

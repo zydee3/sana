@@ -1,30 +1,35 @@
-"""The corpus record. This schema is the contract the backend reads against."""
+"""Corpus records. These schemas are the contract the backend reads against."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
-class Paper:
-    pmcid: str
-    title: str
-    doi: str | None
-    authors: str | None
-    year: str | None
-    license: str | None
+class Candidate:
+    """A discovered paper, normalized across sources, before the quality gate."""
 
-    @classmethod
-    def from_epmc(cls, r: dict[str, Any]) -> Paper:
-        """Build from a Europe PMC `resultType=core` search result."""
-        # firstPublicationDate is "YYYY-MM-DD"; fall back to pubYear.
-        year = (r.get("firstPublicationDate") or "")[:4] or r.get("pubYear")
-        return cls(
-            pmcid=r["pmcid"],
-            title=(r.get("title") or "").strip(),
-            doi=r.get("doi"),
-            authors=r.get("authorString"),
-            year=year or None,
-            license=r.get("license"),
-        )
+    work_id: str  # canonical: OpenAlex W-id, else doi:<doi>, else pmcid:<id>
+    title: str
+    discovered_via: str  # openalex | europepmc | citation
+    openalex_id: str | None = None
+    doi: str | None = None
+    pmcid: str | None = None
+    year: int | None = None
+    authors: str | None = None
+    license: str | None = None
+    abstract: str | None = None
+    is_retracted: bool = False
+    is_oa: bool = True
+    pub_types: tuple[str, ...] = field(default_factory=tuple)
+
+
+def canonical_id(openalex_id: str | None, doi: str | None, pmcid: str | None) -> str:
+    """One key per paper regardless of which source named it. Raises on no id at all."""
+    if openalex_id:
+        return openalex_id
+    if doi:
+        return f"doi:{doi}"
+    if pmcid:
+        return f"pmcid:{pmcid}"
+    raise ValueError("paper has no usable identifier")

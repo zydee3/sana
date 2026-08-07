@@ -1,51 +1,60 @@
-"""CLI: pull open-access research papers (plain text) into the corpus.
+"""CLI for the corpus crawler.
 
-python -m scraper "mindfulness anxiety"        # pull one paper
-python -m scraper "sleep quality" -n 3         # pull up to three
+python -m scraper add-topic "sleep and adolescents" --openalex-topic T10272
+python -m scraper run --once          # drain the queue, then exit
+python -m scraper run                 # keep polling (the k3s service mode)
+
+Triage runs through Claude Code headless (`claude -p`), so it needs the claude CLI
+on PATH with logged-in credentials; without it papers are kept with
+metadata-derived grades. Config (env): SANA_CORPUS (default ./corpus), CLAUDE_BIN,
+OPENALEX_API_KEY, POLL_SECONDS, RECRAWL_DAYS.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
-from . import corpus, europepmc, pmc_oa
+from . import crawl, db, triage
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="scraper",
-        description="Pull open-access research PDFs into Sana's corpus.",
-    )
-    parser.add_argument("query", help='search terms, e.g. "mindfulness anxiety"')
-    parser.add_argument("-n", "--limit", type=int, default=1, help="max papers to pull (default 1)")
+    parser = argparse.ArgumentParser(prog="scraper", description="Build Sana's research corpus.")
     parser.add_argument(
         "--corpus-dir",
         default=os.environ.get("SANA_CORPUS", "corpus"),
-        help="output dir (default ./corpus or $SANA_CORPUS)",
+        help="corpus root (default ./corpus or $SANA_CORPUS); holds corpus.db + texts/",
     )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    add = sub.add_parser("add-topic", help="enqueue a topic to crawl")
+    add.add_argument("name", help='topic label, e.g. "sleep and adolescents"')
+    add.add_argument("--query", help="search expression (default: the name)")
+    add.add_argument("--openalex-topic", help="OpenAlex topic id (e.g. T10272) for cheap discovery")
+
+    run = sub.add_parser("run", help="crawl queued topics")
+    run.add_argument("--once", action="store_true", help="drain the queue then exit")
+
     args = parser.parse_args(argv)
-
     corpus_dir = Path(args.corpus_dir)
-    papers = europepmc.search(args.query, args.limit)
-    if not papers:
-        print(f"no open-access papers found for: {args.query}", file=sys.stderr)
-        return 1
+    conn = db.connect(corpus_dir / "corpus.db")
 
-    for p in papers:
-        if corpus.has(corpus_dir, p.pmcid):
-            print(f"skip  {p.pmcid}  (already in corpus)")
-            continue
-        try:
-            url, text = pmc_oa.download_text(p.pmcid)
-        except LookupError as e:
-            print(f"miss  {p.pmcid}  ({e})")
-            continue
-        path = corpus.save(corpus_dir, p, url, text)
-        print(f"saved {p.pmcid}  {len(text)} chars  -> {path}")
-        print(f"      {p.title}")
+    if args.command == "add-topic":
+        db.add_topic(conn, args.name, args.query or args.name, args.openalex_topic)
+        print(f"queued: {args.name}")
+        return 0
+
+    use_triage = triage.available()
+    if not use_triage:
+        print("warning: claude CLI not found; keeping papers with metadata-derived grades")
+    recrawl_days = int(os.environ.get("RECRAWL_DAYS", "7"))
+    if args.once:
+        while crawl.run_once(conn, corpus_dir, use_triage, recrawl_days):
+            pass
+        return 0
+    poll_seconds = int(os.environ.get("POLL_SECONDS", "300"))
+    crawl.run_loop(conn, corpus_dir, use_triage, poll_seconds, recrawl_days)
     return 0
 
 

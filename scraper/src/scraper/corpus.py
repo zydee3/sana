@@ -1,33 +1,25 @@
-"""The corpus store: plain-text articles plus a JSON metadata sidecar on disk.
+"""The text store: one flat file per work under <corpus>/texts/.
 
-One paper -> `<dir>/<pmcid>.txt` (the article's plain text) and `<dir>/<pmcid>.json`
-(metadata). Presence of the `.txt` is the dedupe key. The store is deliberately dumb files
-today; the backend's retrieval side owns chunking/embedding and can be pointed at whatever
-this grows into.
+Everything else about a work (metadata, provenance, status) lives in corpus.db;
+these files hold only the article text the backend's retrieval side reads.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import asdict
 from pathlib import Path
 
-from .models import Paper
+
+def _safe_name(work_id: str) -> str:
+    # canonical ids can contain '/' (doi:10.x/y); keep filenames flat
+    return work_id.replace("/", "_")
 
 
-def _paths(corpus_dir: Path, pmcid: str) -> tuple[Path, Path]:
-    return corpus_dir / f"{pmcid}.txt", corpus_dir / f"{pmcid}.json"
+def text_path(corpus_dir: Path, work_id: str) -> Path:
+    return corpus_dir / "texts" / f"{_safe_name(work_id)}.txt"
 
 
-def has(corpus_dir: Path, pmcid: str) -> bool:
-    txt, _ = _paths(corpus_dir, pmcid)
-    return txt.exists()
-
-
-def save(corpus_dir: Path, paper: Paper, source_url: str, text: str) -> Path:
-    corpus_dir.mkdir(parents=True, exist_ok=True)
-    txt_path, meta_path = _paths(corpus_dir, paper.pmcid)
-    txt_path.write_text(text, encoding="utf-8")
-    meta = {**asdict(paper), "source_url": source_url, "chars": len(text)}
-    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
-    return txt_path
+def save_text(corpus_dir: Path, work_id: str, text: str) -> Path:
+    path = text_path(corpus_dir, work_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path

@@ -1,4 +1,4 @@
-# Sana scraper. Python (uv-managed); pulls open-access research PDFs into the corpus.
+# Sana scraper. Python (uv-managed); crawls open-access research into the corpus.
 # Requires uv on PATH (https://docs.astral.sh/uv/); it owns the venv and tool installs.
 
 .PHONY: all help uv-check setup run lint typecheck test check clean
@@ -9,7 +9,7 @@ all:
 
 help:
 	@echo "make setup        - create the venv + install dev tools (uv sync)"
-	@echo 'make run QUERY=…   - pull one OA paper into ./corpus (QUERY="mindfulness anxiety")'
+	@echo "make run ARGS=…    - crawler CLI (ARGS='add-topic \"sleep\"', ARGS='run --once')"
 	@echo "make lint          - ruff check + format check"
 	@echo "make typecheck     - mypy (strict)"
 	@echo "make test          - pytest"
@@ -23,7 +23,7 @@ setup: uv-check
 	uv sync
 
 run: uv-check
-	uv run python -m scraper "$(QUERY)" $(ARGS)
+	uv run python -m scraper $(ARGS)
 
 lint: uv-check
 	uv run ruff check .

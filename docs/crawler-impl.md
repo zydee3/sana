@@ -34,10 +34,11 @@ topics(
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,            -- human label, e.g. "sleep and adolescents"
   query TEXT NOT NULL,           -- the search expression sent to sources
+  openalex_id TEXT,              -- OpenAlex topic id (e.g. T10272); enables 10x-cheaper discovery
   status TEXT NOT NULL,          -- pending | active | done
   added_by TEXT NOT NULL,        -- taxonomy | backend | manual
   last_crawled_at TEXT,          -- ISO timestamp; drives re-crawl
-  watermark TEXT                 -- newest publication date seen; next pass starts here
+  watermark TEXT                 -- newest date seen per source; next pass starts here
 )
 
 works(
@@ -67,14 +68,28 @@ for a paper already judged.
 
 ### 1. Discover
 
-Two sources behind one interface (`discover(topic) -> iterator[Candidate]`):
+Two sources behind one interface (`discover(topic) -> iterator[Candidate]`). Facts below
+verified against the live APIs (2026-08-07).
 
-- **OpenAlex** (primary): `GET api.openalex.org/works?search=<query>` with
-  `filter=is_oa:true,from_publication_date:<watermark>`, cursor paging (`cursor=*`),
-  `mailto=` param for the polite pool. Take: id, DOI, PMCID (`ids` object), title, year,
-  authors, `is_retracted`, `best_oa_location` URL, abstract.
-- **Europe PMC** (biomedical depth): the existing `europepmc.search()`, unchanged, mapped
-  into the same Candidate shape.
+- **OpenAlex** (primary, for topics with an `openalex_id`):
+  `GET api.openalex.org/works?filter=primary_topic.id:<Tid>,is_oa:true,from_publication_date:<watermark>`
+  with `select=` field trimming, `sort=publication_date:desc`, cursor paging (`cursor=*`,
+  per-page up to 200). Topic-id filtering costs 1 credit/page; `search=` and `*.search`
+  filters cost 10 credits/page — prefer topic ids. The `/topics` entity (~4,500 curated
+  topics, searchable) is where taxonomy rows get their `openalex_id`.
+  Take: id, DOI, title, year, authors, `is_retracted`, `open_access`, abstract
+  (inverted index — reconstruct by sorting positions). **`ids.pmcid` is no longer
+  populated** — PMCIDs come from the Europe PMC join below.
+  Publication dates include future-dated in-press records (seen: 2030); clamp or tolerate.
+- **Europe PMC** (biomedical depth, and all query-only topics): the existing
+  `europepmc.search()` plus a `FIRST_IDATE:[<watermark> TO *]` clause — index-date
+  windows are the free incremental mechanism. `cursorMark=*` paging, pageSize up to 1000
+  (verified). `resultType=core` also returns `pubTypeList` (labels like "Systematic
+  Review") — a free mechanical evidence-grade signal — plus abstract and license.
+- **Join**: OpenAlex candidates carry DOIs; batch them into one EPMC query
+  (`DOI:"..." OR DOI:"..."`, ~20 per call, free) to obtain PMCIDs for fetch. Papers
+  published in the last weeks usually have no PMCID yet (PMC deposition lags months) —
+  they become `kept_miss` and resolve on a later pass.
 
 Every candidate is normalized to the canonical `work_id` (OpenAlex → DOI → PMCID, first
 available) before the seen-check. Already in `works`: skip, regardless of which source or
@@ -90,8 +105,11 @@ Cheap checks first, in order; first failure writes a `rejected` row with `reject
 
 ### 3. Gate — model triage
 
-Claude (Sonnet) judges title + abstract, batched N candidates per call. Output per paper,
-enforced via tool-use schema: `relevant: bool`, `study_type`, `confidence: 0..1`.
+Claude (Sonnet) judges title + abstract, batched N candidates per call, via **Claude Code
+headless** (`claude -p --output-format json`) — the same runtime the backend uses, so triage
+authenticates with the operator's existing Claude credentials (subscription or key) instead
+of a separate metered API key. The prompt demands a bare JSON array; per paper:
+`relevant: bool`, `study_type`, `confidence: 0..1`. A malformed reply defers the batch.
 Study type maps to grade:
 
 | Grade | Study types |
@@ -112,8 +130,12 @@ weight for retrieval, never a drop. The exact mapping and the keep-threshold on
 In order; first success wins:
 
 1. PMC OA bucket plain text — existing `pmc_oa.download_text()` (needs a PMCID).
-2. `best_oa_location` URL from OpenAlex — fetch and extract text.
+   Verified fresh: papers indexed weeks ago already have `.txt` in the bucket.
+2. Europe PMC `GET /rest/<pmcid>/fullTextXML` — JATS XML, strip to text (verified live).
 3. Neither → status `kept_miss`: full metadata row, no text, fetchable later.
+
+Publisher `oa_url` fetching is dropped for v1: publishers bot-block plain HTTP clients
+(verified 403), and real extraction would need a dependency. `kept_miss` covers the gap.
 
 ### 5. Store
 
@@ -135,45 +157,55 @@ the next pass — caps are recorded, never silent.
 
 - k3s Deployment, 1 replica, image built from `scraper/` (own Dockerfile, per monorepo rule).
 - Volume: hostPath `/sana-data/corpus` mounted read-write.
-- Secret: Anthropic API key (the existing `claude-credentials` k3s secret or a sibling).
-- Config (env): `SANA_CORPUS`, `ANTHROPIC_API_KEY`, `OPENALEX_MAILTO`, `POLL_SECONDS`,
+- Image needs the claude CLI (same base as sana-server); credentials from the existing
+  `claude-credentials` k3s secret.
+- Config (env): `SANA_CORPUS`, `CLAUDE_BIN`, `OPENALEX_API_KEY`, `POLL_SECONDS`,
   `RECRAWL_DAYS`.
 - Logs to stdout; `kubectl logs` is the interface. Metrics endpoint deferred until the
   backend sets the pattern (`backend.md`).
 
-The one-shot CLI (`python -m scraper "<query>"`) stays: it enqueues a topic and runs the
-loop once — same code path, no drift between manual and service runs.
+The CLI drives the same code path as the service — no drift between manual and service
+runs: `python -m scraper add-topic "<name>" [--query Q] [--openalex-topic Tid]` enqueues;
+`python -m scraper run --once` drains the queue and exits; `run` polls forever.
 
 ## Rate limits and retries
 
-- OpenAlex polite pool: ~10 req/s, 100k/day. Stay far under with a fixed inter-request
-  delay; no parallelism in v1.
+- **OpenAlex is metered** (verified 2026-08-07): anonymous = $0.10/day (1,000 credits),
+  free API key = $1/day. Measured costs: entity lookup (DOI/W-id) = 0 credits and
+  unlimited; filtered list = 1 credit/page; any text search = 10 credits/page. Budget
+  headers (`x-ratelimit-*`) arrive on every response — log remaining credits each pass,
+  and stop discovery for the day when they run out (recorded, per the no-silent-caps rule).
+- Europe PMC and the PMC OA bucket: free, no rate-limit headers; keep a fixed
+  inter-request delay as courtesy. No parallelism in v1.
 - HTTP: retry 429/5xx with exponential backoff, small cap; then record the failure and
   move on. A source being down fails the topic pass, not the process.
-- Anthropic: batch triage calls; on failure leave candidates untriaged (`candidate`
-  status) for the next pass rather than guessing.
+- Triage: batch `claude -p` calls; on failure leave candidates untriaged (`candidate`
+  status) for the next pass rather than guessing. Spend lands on the operator's Claude
+  plan (subscription usage windows apply), not a per-token API bill.
 
 ## Flagged uncertainties
 
-Verify these during build; each has a fallback:
+Resolved by live verification (2026-08-07):
 
-1. **OpenAlex incremental filter**: `from_updated_date` may be a Premium-only filter.
-   Fallback (assumed in this spec): watermark on `from_publication_date` — misses
-   later-edited records, acceptable.
-2. **Abstract format**: OpenAlex returns abstracts as an inverted index that must be
-   reconstructed; some works have none. Triage on title alone → lower confidence, and the
-   prompt must say the abstract is missing.
-3. **Two writers, one SQLite file**: crawler writes everything; backend inserts topics.
+- `from_updated_date` is Premium-only, confirmed ("Plan upgrade required"). Incremental
+  crawl uses EPMC `FIRST_IDATE` windows instead; OpenAlex falls back to
+  `from_publication_date` watermarks.
+- Abstract inverted-index reconstruction verified trivial; some works have no abstract —
+  triage on title alone, prompt must say so.
+- Publisher `oa_url` fetching confirmed bot-blocked (403) — dropped for v1, see Fetch.
+
+Still open; each has a fallback:
+
+1. **Two writers, one SQLite file**: crawler writes everything; backend inserts topics.
    WAL supports multi-process on a local filesystem (hostPath qualifies), but this is
    untested here — verify under k3s before relying on it. Fallback: backend enqueues via
    a tiny HTTP endpoint on the crawler instead of touching the DB.
-4. **Retraction recall**: `is_retracted` covers discovery-time screening only. Already-
+2. **Retraction recall**: `is_retracted` covers discovery-time screening only. Already-
    stored works retracted later are caught on re-crawl passes at the earliest — no
    real-time signal. Acceptable for v1; noted so it isn't mistaken for full coverage.
-5. **OA-URL text extraction** (fetch fallback 2): arbitrary publisher HTML/PDF → text is
-   the messiest part of the pipeline and may need a dependency (e.g. trafilatura),
-   breaking the scraper's stdlib-only rule. Decide when reached; `kept_miss` is the
-   escape hatch until then.
+3. **OpenAlex key mechanics**: how the free API key is passed (header vs `api_key`
+   param) is undocumented in what was checked; verify when a key exists. Anonymous tier
+   works today and the code must run keyless.
 
 ## Not in this spec
 
