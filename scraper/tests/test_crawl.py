@@ -166,3 +166,21 @@ def test_retriage_retires_candidates_judged_under_another_id(
     row = conn.execute("SELECT status, reject_reason FROM works WHERE work_id = 'doi:10.1/a'")
     assert tuple(row.fetchone()) == ("rejected", "duplicate")
     assert db.deferred_candidates(conn, limit=10) == []
+
+
+def test_pass_summary_counts_every_status(
+    topic: tuple[sqlite3.Connection, db.Topic],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn, t = topic
+    db.record_work(conn, _cand("W1"), t.id, status="kept_miss")
+    db.record_work(conn, _cand("W2"), t.id, status="candidate")
+    db.record_work(conn, _cand("W3"), t.id, status="surprise")
+    db.finish_topic(conn, t.id, "2026-01-01")
+
+    crawl.log_pass_summary(conn)
+
+    assert capsys.readouterr().out == (
+        "pass: works kept_text=0 kept_miss=1 candidate=1 rejected=0 retracted=0 surprise=1;"
+        " topics 1/1 crawled\n"
+    )

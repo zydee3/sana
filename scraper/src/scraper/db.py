@@ -143,6 +143,20 @@ def deferred_candidates(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Ro
     ).fetchall()
 
 
+def status_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """works rows per status."""
+    rows = conn.execute("SELECT status, COUNT(*) FROM works GROUP BY status").fetchall()
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+def topic_progress(conn: sqlite3.Connection) -> tuple[int, int]:
+    """(topics crawled at least once, topics configured)."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(last_crawled_at IS NOT NULL), 0), COUNT(*) FROM topics"
+    ).fetchone()
+    return int(row[0]), int(row[1])
+
+
 def seen(conn: sqlite3.Connection, c: Candidate) -> bool:
     """Judged under any identifier — sources name the same paper differently.
 

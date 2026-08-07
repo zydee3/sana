@@ -26,6 +26,9 @@ REQUEST_DELAY_S = 0.2
 # deferred works re-judged per idle poll; small because each batch of 8 costs a model call
 RETRIAGE_PER_PASS = 40
 
+# stable leading order for the pass summary; unknown statuses are appended, never dropped
+SUMMARY_STATUSES = ("kept_text", "kept_miss", "candidate", "rejected", "retracted")
+
 # Publisher-declared pub types that map cleanly onto a study type (used when no
 # model triage is available; the model's judgment supersedes these).
 STUDY_TYPE_BY_PUB_TYPE = {
@@ -306,6 +309,15 @@ def run_once(
     return True
 
 
+def log_pass_summary(conn: sqlite3.Connection) -> None:
+    """One grep-able line of corpus state per pass — the cheap way to read a trend."""
+    counts = db.status_counts(conn)
+    extra = sorted(set(counts) - set(SUMMARY_STATUSES))
+    body = " ".join(f"{s}={counts.get(s, 0)}" for s in (*SUMMARY_STATUSES, *extra))
+    done, total = db.topic_progress(conn)
+    _log(f"pass: works {body}; topics {done}/{total} crawled")
+
+
 def run_loop(
     conn: sqlite3.Connection,
     corpus_dir: Path,
@@ -315,10 +327,13 @@ def run_loop(
 ) -> None:
     _log("crawler: draining topic queue")
     while True:
-        if not run_once(conn, corpus_dir, use_triage, recrawl_days):
+        idle = not run_once(conn, corpus_dir, use_triage, recrawl_days)
+        if idle:
             # idle time is when deferred works get worked off, not the re-crawl interval
             try:
                 retriage_deferred(conn, corpus_dir, use_triage)
             except OSError as e:
                 _log(f"retriage failed ({e})")
+        log_pass_summary(conn)
+        if idle:
             time.sleep(poll_seconds)
