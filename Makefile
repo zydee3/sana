@@ -13,8 +13,8 @@ help:
 	@echo "make            - build every project's artifact (app bundle, server image)"
 	@echo "make setup      - first-time setup in every project (deps + prereq checks)"
 	@echo "make check      - run every project's check gate (app, scraper)"
-	@echo "make docker     - build every project's image (sana-app, sana-server)"
-	@echo "make deploy     - deploy (currently: server -> k3s; app hosting not configured)"
+	@echo "make docker     - build every project's image (sana-app, sana-server, sana-scraper)"
+	@echo "make deploy     - deploy server + scraper -> k3s (app hosting not configured)"
 	@echo "make app-<t>    - run target <t> in app/ (make app-web, make app-check, ...)"
 	@echo "make server-<t> - run target <t> in server/"
 	@echo "make scraper-<t> - run target <t> in scraper/"
@@ -32,10 +32,12 @@ check:
 docker:
 	@$(MAKE) -C app docker
 	@$(MAKE) -C server build
+	@$(MAKE) -C scraper build
 
 # app deploy joins when a web host is chosen (app/Makefile deploy is a stub).
 deploy:
 	@$(MAKE) -C server deploy
+	@$(MAKE) -C scraper deploy
 
 app-%:
 	@$(MAKE) -C app $*

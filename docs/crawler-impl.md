@@ -157,10 +157,22 @@ the next pass — caps are recorded, never silent.
 
 - k3s Deployment, 1 replica, image built from `scraper/` (own Dockerfile, per monorepo rule).
 - Volume: hostPath `/sana-data/corpus` mounted read-write.
-- Image needs the claude CLI (same base as sana-server); credentials from the existing
-  `claude-credentials` k3s secret.
-- Config (env): `SANA_CORPUS`, `CLAUDE_BIN`, `OPENALEX_API_KEY`, `POLL_SECONDS`,
-  `RECRAWL_DAYS`.
+- Image: python3.12-slim + Node 22 + the claude CLI; UID-1000 user. Credentials are a
+  **live hostPath mount** of `~/.claude/.credentials.json` (read-only, no subPath) — never
+  a copied secret: the CLI rotates OAuth tokens and snapshots start returning 401.
+- Topics: `scraper/topics.md` (one bullet per topic, optional `(Txxxx)` OpenAlex id) is
+  rendered into the `sana-topics` ConfigMap by `make deploy` and read from `$SANA_TOPICS`
+  at startup (idempotent sync into the queue). Topics claimed by a killed worker are
+  re-queued on startup.
+- `strategy: Recreate` — corpus.db has exactly one writer.
+- Config (env): `SANA_CORPUS`, `SANA_TOPICS`, `CLAUDE_BIN`, `OPENALEX_API_KEY`,
+  `POLL_SECONDS`, `RECRAWL_DAYS`, `DISCORD_BOT_TOKEN`/`DISCORD_CHANNEL_ID`.
+- Observability: hourly Discord message (count of works with text / tracked) posted by a
+  daemon thread; best-effort, never blocks the crawl. Token is copied at deploy time from
+  the discord-bot namespace secret; unset disables the reporter.
+- `make deploy` (scraper/ or root): build image → import into k3s containerd → render
+  ConfigMap → apply → restart. A page-capped sweep holds the topic watermark so re-crawls
+  keep re-paging the window until a full sweep completes.
 - Logs to stdout; `kubectl logs` is the interface. Metrics endpoint deferred until the
   backend sets the pattern (`backend.md`).
 

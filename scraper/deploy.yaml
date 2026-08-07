@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sana-scraper
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single writer on corpus.db; never run two crawlers at once
+  selector:
+    matchLabels:
+      app: sana-scraper
+  template:
+    metadata:
+      labels:
+        app: sana-scraper
+    spec:
+      containers:
+        - name: scraper
+          image: docker.io/library/sana-scraper:latest
+          imagePullPolicy: Never # image is imported into containerd, never pulled
+          env:
+            - name: SANA_TOPICS
+              valueFrom:
+                configMapKeyRef:
+                  name: sana-topics
+                  key: topics
+            # hourly scraped-count message to #scraper; token copied from the
+            # discord-bot namespace by `make deploy` (secrets are namespace-scoped)
+            - name: DISCORD_CHANNEL_ID
+              value: "1535199022334083082"
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: discord-bot-token
+                  key: DISCORD_BOT_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # no subPath: subPath + a single-file hostPath fails to mount
+            - name: claude-credentials
+              mountPath: /home/scraper/.claude/.credentials.json
+              readOnly: true
+      volumes:
+        # /sana-data is the fixed host-side location on every machine; make it a
+        # directory or a symlink to the disk of your choice (one-time setup, README).
+        - name: data
+          hostPath:
+            path: /sana-data
+            type: Directory
+        # live host credentials, not a secret snapshot: the claude CLI rotates
+        # OAuth tokens, and a copied snapshot starts returning 401 once it does
+        - name: claude-credentials
+          hostPath:
+            path: /home/vince/.claude/.credentials.json
+            type: File

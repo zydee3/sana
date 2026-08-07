@@ -1,22 +1,28 @@
 """CLI for the corpus crawler.
 
+python -m scraper                     # the service mode: sync $SANA_TOPICS, poll forever
 python -m scraper add-topic "sleep and adolescents" --openalex-topic T10272
 python -m scraper run --once          # drain the queue, then exit
-python -m scraper run                 # keep polling (the k3s service mode)
+
+Topics arrive either via `add-topic` or the SANA_TOPICS env var (bullet lines,
+`- <topic name> (Txxxx)` with an optional OpenAlex topic id), synced into the queue
+at startup — in k3s that env comes from the sana-topics ConfigMap.
 
 Triage runs through Claude Code headless (`claude -p`), so it needs the claude CLI
 on PATH with logged-in credentials; without it papers are kept with
-metadata-derived grades. Config (env): SANA_CORPUS (default ./corpus), CLAUDE_BIN,
-OPENALEX_API_KEY, POLL_SECONDS, RECRAWL_DAYS.
+metadata-derived grades. Config (env): SANA_CORPUS (default ./corpus), SANA_TOPICS,
+CLAUDE_BIN, OPENALEX_API_KEY, POLL_SECONDS, RECRAWL_DAYS, and — for the hourly
+scraped-count message — DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID (unset = off).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
-from . import crawl, db, triage
+from . import crawl, db, report, triage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,17 +32,17 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("SANA_CORPUS", "corpus"),
         help="corpus root (default ./corpus or $SANA_CORPUS); holds corpus.db + texts/",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     add = sub.add_parser("add-topic", help="enqueue a topic to crawl")
     add.add_argument("name", help='topic label, e.g. "sleep and adolescents"')
     add.add_argument("--query", help="search expression (default: the name)")
     add.add_argument("--openalex-topic", help="OpenAlex topic id (e.g. T10272) for cheap discovery")
 
-    run = sub.add_parser("run", help="crawl queued topics")
+    run = sub.add_parser("run", help="crawl queued topics (the default command)")
     run.add_argument("--once", action="store_true", help="drain the queue then exit")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:] or ["run"])
     corpus_dir = Path(args.corpus_dir)
     conn = db.connect(corpus_dir / "corpus.db")
 
@@ -45,14 +51,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"queued: {args.name}")
         return 0
 
+    recovered = db.recover_active_topics(conn)
+    if recovered:
+        print(f"recovered {recovered} topics claimed by a previous worker", flush=True)
+    crawl.sync_topics(conn, os.environ.get("SANA_TOPICS", ""))
     use_triage = triage.available()
     if not use_triage:
         print("warning: claude CLI not found; keeping papers with metadata-derived grades")
     recrawl_days = int(os.environ.get("RECRAWL_DAYS", "7"))
-    if args.once:
+    if getattr(args, "once", False):
         while crawl.run_once(conn, corpus_dir, use_triage, recrawl_days):
             pass
         return 0
+    token = os.environ.get("DISCORD_BOT_TOKEN")
+    channel_id = os.environ.get("DISCORD_CHANNEL_ID")
+    if token and channel_id:
+        report.start_reporter(corpus_dir / "corpus.db", token, channel_id)
+        print("discord reporter started", flush=True)
     poll_seconds = int(os.environ.get("POLL_SECONDS", "300"))
     crawl.run_loop(conn, corpus_dir, use_triage, poll_seconds, recrawl_days)
     return 0

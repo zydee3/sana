@@ -72,7 +72,7 @@ def works_by_topic(
     since: str | None,
     fetch: Fetch = get_json,
     per_page: int = 200,
-    max_pages: int = 5,
+    max_pages: int = 25,
 ) -> tuple[list[Candidate], bool]:
     """One credit per page. Returns (candidates, truncated-by-page-cap)."""
     flt = f"primary_topic.id:{topic_id},is_oa:true"

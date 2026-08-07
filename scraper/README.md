@@ -23,7 +23,8 @@ make check                                    # ruff + mypy + pytest (the verifi
 
 Config (env): `SANA_CORPUS` (corpus root, default `./corpus`), `CLAUDE_BIN` (path to the
 claude CLI, default `claude` on PATH), `OPENALEX_API_KEY` (raises the free OpenAlex budget
-10x), `POLL_SECONDS`, `RECRAWL_DAYS`.
+10x), `POLL_SECONDS`, `RECRAWL_DAYS`, `DISCORD_BOT_TOKEN` + `DISCORD_CHANNEL_ID` (hourly
+scraped-count message; unset = off).
 
 ### The pipeline
 
@@ -51,11 +52,20 @@ Python dependencies: **none** — the standard library (`urllib`, `sqlite3`, `su
 (optional at runtime; the pipeline degrades to metadata grades without it). Dev tools
 (ruff, mypy, pytest) are managed by `uv`.
 
+## Deployment (k3s)
+
+`make deploy` builds the image (python + claude CLI), imports it into k3s, renders
+`topics.md` into the `sana-topics` ConfigMap, applies `deploy.yaml`, and restarts. The
+container runs `python -m scraper` with no args: sync `$SANA_TOPICS` → drain the queue →
+poll forever. Data lands on the hostPath `/sana-data` (symlink to the data disk); Claude
+credentials are a live hostPath mount of `~/.claude/.credentials.json` (read-only, no
+subPath — a copied secret goes stale when tokens rotate). Edit `topics.md`, `make deploy`
+again to ship new topics.
+
 ## Not built yet
 
-- Topic taxonomy contents (the human-reviewed seed list; topics are enqueued by hand today).
-- Own container + k3s Deployment (runs as a CLI; the image will need the claude CLI + mounted
-  credentials, like sana-server; the backend will enqueue topics by inserting into the shared
-  SQLite `topics` table).
+- Topic taxonomy beyond the seed list in `topics.md`.
+- Backend enqueue path (inserting into the shared SQLite `topics` table).
+- Re-triage of deferred candidates and retry of metadata-only misses.
 - Text normalization beyond the sources' own extraction; a queryable index beyond SQLite.
 - Chunking / embedding is owned by the backend's retrieval side, not here.
