@@ -45,8 +45,8 @@ def search_window(
     query: str,
     since: str | None,
     fetch: Fetch = get_json,
-    page_size: int = 100,
-    max_pages: int = 5,
+    page_size: int = 500,
+    max_pages: int = 10,
 ) -> tuple[list[Candidate], bool]:
     """Open-access hits for a topic query, incremental via FIRST_IDATE windows.
 
@@ -78,22 +78,35 @@ def search_window(
     return out, True
 
 
+def _search_dois(dois: Iterable[str], result_type: str, fetch: Fetch) -> list[dict[str, Any]]:
+    """One OR-query over a DOI batch (~20 per call)."""
+    wanted = [d for d in dois if d]
+    if not wanted:
+        return []
+    q = " OR ".join(f'DOI:"{d}"' for d in wanted)
+    params = urllib.parse.urlencode(
+        {"query": q, "format": "json", "resultType": result_type, "pageSize": len(wanted) + 5}
+    )
+    payload = fetch(f"{SEARCH_URL}?{params}")
+    results: list[dict[str, Any]] = payload.get("resultList", {}).get("result", [])
+    return results
+
+
 def pmcids_for_dois(dois: Iterable[str], fetch: Fetch = get_json) -> dict[str, str]:
-    """Batch-join DOIs to PMCIDs with one OR-query (~20 DOIs per call).
+    """Batch-join DOIs to PMCIDs.
 
     Recently published papers often have no PMCID yet (PMC deposition lags);
     they are simply absent from the result.
     """
-    wanted = [d for d in dois if d]
-    if not wanted:
-        return {}
-    q = " OR ".join(f'DOI:"{d}"' for d in wanted)
-    params = urllib.parse.urlencode(
-        {"query": q, "format": "json", "resultType": "lite", "pageSize": len(wanted) + 5}
-    )
-    payload = fetch(f"{SEARCH_URL}?{params}")
-    results = payload.get("resultList", {}).get("result", [])
+    results = _search_dois(dois, "lite", fetch)
     return {r["doi"].lower(): r["pmcid"] for r in results if r.get("doi") and r.get("pmcid")}
+
+
+def records_for_dois(dois: Iterable[str], fetch: Fetch = get_json) -> dict[str, Candidate]:
+    """Batch-fetch full records by DOI — abstracts and pub types the works table drops."""
+    return {
+        r["doi"].lower(): from_epmc(r) for r in _search_dois(dois, "core", fetch) if r.get("doi")
+    }
 
 
 def full_text(pmcid: str, fetch_bytes: FetchBytes = get_bytes) -> str | None:

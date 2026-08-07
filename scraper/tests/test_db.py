@@ -43,6 +43,15 @@ def test_claim_finish_and_recrawl(tmp_path: Path) -> None:
     assert stale is not None and stale.watermark == "2026-08-01"
 
 
+def test_recover_active_topics_requeues_orphans(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    db.add_topic(conn, "sleep", "sleep")
+    claimed = db.claim_next_topic(conn, recrawl_days=7, now=T0)
+    assert claimed is not None
+    assert db.recover_active_topics(conn) == 1
+    assert db.claim_next_topic(conn, recrawl_days=7, now=T0) is not None
+
+
 def test_seen_matches_any_identifier(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     db.record_work(conn, CAND, topic_id=None, status="kept_miss")
@@ -56,6 +65,41 @@ def test_seen_matches_any_identifier(tmp_path: Path) -> None:
     assert db.seen(conn, CAND) is True
     assert db.seen(conn, same_by_doi) is True
     assert db.seen(conn, other) is False
+
+
+def test_deferred_candidates_stay_unseen_until_judged(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    db.add_topic(conn, "sleep", "sleep")
+    topic = db.claim_next_topic(conn, recrawl_days=7, now=T0)
+    assert topic is not None
+    db.record_work(conn, CAND, topic.id, status="candidate")
+
+    assert db.seen(conn, CAND) is False  # a deferral is not a judgment
+    rows = db.deferred_candidates(conn, limit=10)
+    assert [r["work_id"] for r in rows] == ["W123"]
+
+    db.record_work(conn, CAND, topic.id, status="kept_miss", study_type="rct", evidence_grade=2)
+    row = conn.execute("SELECT status, evidence_grade FROM works").fetchone()
+    assert (row["status"], row["evidence_grade"]) == ("kept_miss", 2)
+    assert db.seen(conn, CAND) is True
+    assert db.deferred_candidates(conn, limit=10) == []
+
+
+def test_record_work_never_downgrades_a_judged_row(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    db.record_work(conn, CAND, None, status="kept_miss", study_type="rct", evidence_grade=2)
+    db.set_fetched(conn, "W123", "texts/W123.txt", "pmc_oa_txt", now=T0)
+    db.record_work(conn, CAND, None, status="rejected", reject_reason="triage")
+    row = conn.execute("SELECT status, text_path FROM works").fetchone()
+    assert (row["status"], row["text_path"]) == ("kept_text", "texts/W123.txt")
+
+
+def test_topic_by_id(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    db.add_topic(conn, "sleep", "sleep quality", "T1")
+    topic = db.topic_by_id(conn, 1)
+    assert topic is not None and topic.name == "sleep" and topic.openalex_id == "T1"
+    assert db.topic_by_id(conn, 99) is None
 
 
 def test_fetch_and_expand_lifecycle(tmp_path: Path) -> None:

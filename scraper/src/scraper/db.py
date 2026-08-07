@@ -84,6 +84,13 @@ def add_topic(
         )
 
 
+def recover_active_topics(conn: sqlite3.Connection) -> int:
+    """Re-queue topics a killed worker left claimed. Startup-only: single writer."""
+    with conn:
+        cur = conn.execute("UPDATE topics SET status = 'pending' WHERE status = 'active'")
+    return cur.rowcount
+
+
 def claim_next_topic(
     conn: sqlite3.Connection, recrawl_days: int, now: datetime | None = None
 ) -> Topic | None:
@@ -116,11 +123,34 @@ def finish_topic(
         )
 
 
-def seen(conn: sqlite3.Connection, c: Candidate) -> bool:
-    """Known under any identifier — sources name the same paper differently."""
+def topic_by_id(conn: sqlite3.Connection, topic_id: int) -> Topic | None:
     row = conn.execute(
-        """SELECT 1 FROM works WHERE work_id = ?
-           OR (doi IS NOT NULL AND doi = ?) OR (pmcid IS NOT NULL AND pmcid = ?) LIMIT 1""",
+        "SELECT id, name, query, openalex_id, watermark FROM topics WHERE id = ?", (topic_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return Topic(row["id"], row["name"], row["query"], row["openalex_id"], row["watermark"])
+
+
+def deferred_candidates(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+    """Oldest works a triage outage left as 'candidate', grouped by topic."""
+    return conn.execute(
+        """SELECT work_id, openalex_id, doi, pmcid, title, year, authors, license,
+                  topic_id, discovered_via
+           FROM works WHERE status = 'candidate' AND topic_id IS NOT NULL
+           ORDER BY topic_id, rowid LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+
+def seen(conn: sqlite3.Connection, c: Candidate) -> bool:
+    """Judged under any identifier — sources name the same paper differently.
+
+    'candidate' rows are triage deferrals, not judgments, so they stay re-offerable.
+    """
+    row = conn.execute(
+        """SELECT 1 FROM works WHERE status != 'candidate' AND (work_id = ?
+           OR (doi IS NOT NULL AND doi = ?) OR (pmcid IS NOT NULL AND pmcid = ?)) LIMIT 1""",
         (c.work_id, c.doi, c.pmcid),
     ).fetchone()
     return row is not None
@@ -136,13 +166,22 @@ def record_work(
     evidence_grade: int | None = None,
     triage_confidence: float | None = None,
 ) -> None:
+    """Insert a judged work; a row still deferred as 'candidate' is upgraded in place."""
     with conn:
         conn.execute(
-            """INSERT OR IGNORE INTO works
+            """INSERT INTO works
                (work_id, openalex_id, doi, pmcid, title, year, authors, license, topic_id,
                 discovered_via, status, reject_reason, study_type, evidence_grade,
                 triage_confidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(work_id) DO UPDATE SET
+                 status = excluded.status,
+                 reject_reason = excluded.reject_reason,
+                 study_type = excluded.study_type,
+                 evidence_grade = excluded.evidence_grade,
+                 triage_confidence = excluded.triage_confidence,
+                 pmcid = COALESCE(excluded.pmcid, works.pmcid)
+               WHERE works.status = 'candidate'""",
             (
                 c.work_id,
                 c.openalex_id,

@@ -5,7 +5,7 @@ import pytest
 
 from scraper import crawl, db, europepmc, pmc_oa
 from scraper.models import Candidate
-from scraper.triage import TriageError
+from scraper.triage import TriageError, Verdict
 
 
 def _cand(work_id: str, **kw: object) -> Candidate:
@@ -20,6 +20,34 @@ def topic(tmp_path: Path) -> tuple[sqlite3.Connection, db.Topic]:
     claimed = db.claim_next_topic(conn, recrawl_days=7)
     assert claimed is not None
     return conn, claimed
+
+
+def test_parse_topics_reads_bullets_and_ignores_prose() -> None:
+    text = (
+        "# Corpus topics\n"
+        "Notes about the format.\n"
+        "- mental health treatment and access (T10272)\n"
+        "- sleep quality\n"
+        "  - resilience and mental health (T11761)\n"
+        "-not a bullet\n"
+    )
+    assert crawl.parse_topics(text) == [
+        ("mental health treatment and access", "T10272"),
+        ("sleep quality", None),
+        ("resilience and mental health", "T11761"),
+    ]
+
+
+def test_sync_topics_is_idempotent(tmp_path: Path) -> None:
+    conn = db.connect(tmp_path / "corpus.db")
+    text = "- sleep quality (T1)\n- anxiety\n"
+    assert crawl.sync_topics(conn, text) == 2
+    assert crawl.sync_topics(conn, text) == 2
+    rows = conn.execute("SELECT name, openalex_id, added_by FROM topics ORDER BY id").fetchall()
+    assert [(r["name"], r["openalex_id"], r["added_by"]) for r in rows] == [
+        ("sleep quality", "T1", "config"),
+        ("anxiety", None, "config"),
+    ]
 
 
 def test_dedupe_joins_on_any_identifier() -> None:
@@ -87,3 +115,54 @@ def test_triage_failure_defers_candidates(
     crawl.process_candidates(conn, t, [_cand("W1")], tmp_path, use_triage=True)
     row = conn.execute("SELECT status FROM works WHERE work_id = 'W1'").fetchone()
     assert row["status"] == "candidate"
+
+
+def test_retriage_deferred_rehydrates_and_judges(
+    topic: tuple[sqlite3.Connection, db.Topic],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, t = topic
+    monkeypatch.setattr(crawl, "REQUEST_DELAY_S", 0)
+    db.record_work(conn, _cand("W1", doi="10.1/a"), t.id, status="candidate")
+    db.record_work(conn, _cand("W2"), t.id, status="candidate")
+
+    full = _cand("W1", doi="10.1/a", pub_types=("Meta-Analysis",), abstract="Pooled trials.")
+    monkeypatch.setattr(europepmc, "records_for_dois", lambda dois, fetch=None: {"10.1/a": full})
+    monkeypatch.setattr(europepmc, "pmcids_for_dois", lambda dois, fetch=None: {})
+
+    judged: list[Candidate] = []
+
+    def fake_triage(cands: list[Candidate], run: object = None) -> list[Verdict]:
+        judged.extend(cands)
+        return [
+            Verdict(relevant=c.abstract is not None, study_type="other", confidence=0.5)
+            for c in cands
+        ]
+
+    monkeypatch.setattr(crawl, "triage", fake_triage)
+    crawl.retriage_deferred(conn, tmp_path, use_triage=True, limit=10)
+
+    # only W1 had a DOI to rehydrate from
+    assert [c.abstract for c in judged] == ["Pooled trials.", None]
+    rows = {r["work_id"]: r["status"] for r in conn.execute("SELECT work_id, status FROM works")}
+    assert rows == {"W1": "kept_miss", "W2": "rejected"}
+    assert db.deferred_candidates(conn, limit=10) == []
+
+
+def test_retriage_retires_candidates_judged_under_another_id(
+    topic: tuple[sqlite3.Connection, db.Topic],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, t = topic
+    monkeypatch.setattr(crawl, "REQUEST_DELAY_S", 0)
+    monkeypatch.setattr(europepmc, "records_for_dois", lambda dois, fetch=None: {})
+    db.record_work(conn, _cand("doi:10.1/a", doi="10.1/a"), t.id, status="candidate")
+    db.record_work(conn, _cand("W1", doi="10.1/a"), t.id, status="kept_miss")
+
+    crawl.retriage_deferred(conn, tmp_path, use_triage=False, limit=10)
+
+    row = conn.execute("SELECT status, reject_reason FROM works WHERE work_id = 'doi:10.1/a'")
+    assert tuple(row.fetchone()) == ("rejected", "duplicate")
+    assert db.deferred_candidates(conn, limit=10) == []
