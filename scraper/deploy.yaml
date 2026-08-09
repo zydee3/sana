@@ -37,9 +37,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            # no subPath: subPath + a single-file hostPath fails to mount
+            # the directory, not the file: the image symlinks
+            # ~/.claude/.credentials.json here (see Dockerfile)
             - name: claude-credentials
-              mountPath: /home/scraper/.claude/.credentials.json
+              mountPath: /host-claude
               readOnly: true
       volumes:
         # /sana-data is the fixed host-side location on every machine; make it a
@@ -49,8 +50,11 @@ spec:
             path: /sana-data
             type: Directory
         # live host credentials, not a secret snapshot: the claude CLI rotates
-        # OAuth tokens, and a copied snapshot starts returning 401 once it does
+        # OAuth tokens, and a copied snapshot starts returning 401 once it does.
+        # Mount the directory: a single-file hostPath binds one inode, and the
+        # CLI refreshes by atomic rename, so the container keeps reading the
+        # pre-rotation token until the pod restarts (401 "token has been revoked").
         - name: claude-credentials
           hostPath:
-            path: /home/vince/.claude/.credentials.json
-            type: File
+            path: /home/vince/.claude
+            type: Directory
