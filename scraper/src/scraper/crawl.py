@@ -1,9 +1,15 @@
 """The crawl worker: drain the topic queue, one pipeline pass per topic.
 
 Per topic: discover (OpenAlex topic filter + Europe PMC query) → mechanical gate
-(retraction, open access) → model triage → PMCID join → fetch text (PMC bucket,
-then fullTextXML) → store → bounded citation expansion. Every candidate becomes a
-works row — kept, rejected, or missed — so re-crawls never re-judge old papers.
+(retraction, open access) → PMCID join → fetch text (PMC bucket, then fullTextXML)
+→ store → bounded citation expansion. Every candidate becomes a works row — kept,
+rejected, or missed — so re-crawls never re-judge old papers.
+
+Fetch-first: nothing here calls a model. Topic-scoped discovery is the relevance
+filter (it lets some off-topic papers through, accepted), and the study type comes
+from publisher metadata where that is decisive. Ingest therefore keeps running
+through model quota limits and credential outages, which is what actually stalled
+it. Works left ungraded are the work list for out-of-band enrichment (triage.py).
 """
 
 from __future__ import annotations
@@ -16,28 +22,32 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import corpus, db, europepmc, openalex, pmc_oa
-from .models import Candidate
-from .triage import GRADE_BY_STUDY_TYPE, TriageError, Verdict, triage
+from .models import GRADE_BY_STUDY_TYPE, Candidate
 
 JOIN_BATCH = 20
 EXPAND_WORKS_PER_PASS = 10
 REFS_PER_WORK = 10
 REQUEST_DELAY_S = 0.2
-# deferred works re-judged per idle poll; small because each batch of 8 costs a model call
-RETRIAGE_PER_PASS = 40
+# backlog works pushed through the fetch path per idle poll; bounded by fetch time
+# (~1s each), not model spend
+DRAIN_PER_PASS = 500
 
 # stable leading order for the pass summary; unknown statuses are appended, never dropped
 SUMMARY_STATUSES = ("kept_text", "kept_miss", "candidate", "rejected", "retracted")
 
-# Publisher-declared pub types that map cleanly onto a study type (used when no
-# model triage is available; the model's judgment supersedes these).
+# Publisher-declared pub types that decide a study type on their own. Anything else
+# leaves the study type unknown rather than guessing "other" — a null grade is the
+# enrichment work list, a wrong grade is silent.
 STUDY_TYPE_BY_PUB_TYPE = {
     "meta-analysis": "meta_analysis",
+    "network meta-analysis": "meta_analysis",
     "systematic review": "systematic_review",
     "systematic-review": "systematic_review",
     "randomized controlled trial": "rct",
     "randomized-controlled-trial": "rct",
+    "observational study": "observational",
     "case reports": "case_report",
+    "editorial": "opinion",
 }
 
 
@@ -100,37 +110,16 @@ def discover(topic: db.Topic) -> tuple[list[Candidate], bool]:
     return _dedupe(cands), capped
 
 
-def _metadata_verdict(c: Candidate) -> Verdict:
-    """No-triage fallback: keep, grading from publisher-declared type when clear."""
-    for pt in c.pub_types:
-        study_type = STUDY_TYPE_BY_PUB_TYPE.get(pt.lower())
-        if study_type:
-            return Verdict(relevant=True, study_type=study_type, confidence=0.0)
-    return Verdict(relevant=True, study_type="other", confidence=0.0)
+def _study_type(c: Candidate) -> str | None:
+    """Study type from publisher-declared pub types, or None when they don't decide it.
 
-
-def _judge(
-    conn: sqlite3.Connection, topic_id: int, cands: list[Candidate], use_triage: bool
-) -> list[tuple[Candidate, Verdict]]:
-    """Model triage via claude -p; on failure leave candidates for the next pass."""
-    if not cands:
-        return []
-    if not use_triage:
-        return [(c, _metadata_verdict(c)) for c in cands]
-    try:
-        verdicts = triage(cands)
-    except TriageError as e:
-        _log(f"triage failed ({e}); {len(cands)} candidates deferred to next pass")
-        for c in cands:
-            db.record_work(conn, c, topic_id, status="candidate")
-        return []
-    kept: list[tuple[Candidate, Verdict]] = []
-    for c, v in zip(cands, verdicts, strict=True):
-        if v.relevant:
-            kept.append((c, v))
-        else:
-            db.record_work(conn, c, topic_id, status="rejected", reject_reason="triage")
-    return kept
+    Strongest match wins: Europe PMC tags a systematic review as both "Review" and
+    "Systematic Review", and a paper can be both an RCT and a meta-analysis source.
+    """
+    graded = [
+        st for pt in c.pub_types if (st := STUDY_TYPE_BY_PUB_TYPE.get(pt.lower())) is not None
+    ]
+    return min(graded, key=lambda st: GRADE_BY_STUDY_TYPE[st]) if graded else None
 
 
 def _join_pmcids(cands: list[Candidate]) -> list[Candidate]:
@@ -166,9 +155,8 @@ def process_candidates(
     topic: db.Topic,
     cands: list[Candidate],
     corpus_dir: Path,
-    use_triage: bool,
 ) -> int:
-    """Gate → triage → join → fetch → store. Returns how many works got text."""
+    """Gate → join → fetch → store. Returns how many works got text."""
     fresh = [c for c in cands if not db.seen(conn, c)]
     survivors: list[Candidate] = []
     for c in fresh:
@@ -178,17 +166,17 @@ def process_candidates(
             db.record_work(conn, c, topic.id, status="rejected", reject_reason="not_open_access")
         else:
             survivors.append(c)
-    kept = _join_pmcids_paired(_judge(conn, topic.id, survivors, use_triage))
+    kept = _join_pmcids(survivors)
     fetched = 0
-    for c, v in kept:
+    for c in kept:
+        study_type = _study_type(c)
         db.record_work(
             conn,
             c,
             topic.id,
             status="kept_miss",
-            study_type=v.study_type,
-            evidence_grade=GRADE_BY_STUDY_TYPE.get(v.study_type),
-            triage_confidence=v.confidence or None,
+            study_type=study_type,
+            evidence_grade=GRADE_BY_STUDY_TYPE[study_type] if study_type else None,
         )
         result = _fetch_text(c)
         if result:
@@ -202,13 +190,6 @@ def process_candidates(
         f"{len(kept)} kept, {fetched} with text"
     )
     return fetched
-
-
-def _join_pmcids_paired(
-    kept: list[tuple[Candidate, Verdict]],
-) -> list[tuple[Candidate, Verdict]]:
-    joined = _join_pmcids([c for c, _ in kept])
-    return list(zip(joined, (v for _, v in kept), strict=True))
 
 
 def _candidate_from_row(row: sqlite3.Row) -> Candidate:
@@ -227,7 +208,11 @@ def _candidate_from_row(row: sqlite3.Row) -> Candidate:
 
 
 def _rehydrate(cands: list[Candidate]) -> list[Candidate]:
-    """Abstracts aren't stored, so re-fetch them; triage on titles alone grades badly."""
+    """Works rows keep no pub types, so re-fetch them — they carry the study type.
+
+    The same record supplies a PMCID when the row lacks one, which spares the join
+    a second lookup over the same DOIs.
+    """
     dois = [c.doi for c in cands if c.doi]
     found: dict[str, Candidate] = {}
     for start in range(0, len(dois), JOIN_BATCH):
@@ -236,14 +221,12 @@ def _rehydrate(cands: list[Candidate]) -> list[Candidate]:
     out = []
     for c in cands:
         r = found.get(c.doi.lower()) if c.doi else None
-        out.append(replace(c, abstract=r.abstract, pub_types=r.pub_types) if r else c)
+        out.append(replace(c, pub_types=r.pub_types, pmcid=c.pmcid or r.pmcid) if r else c)
     return out
 
 
-def retriage_deferred(
-    conn: sqlite3.Connection, corpus_dir: Path, use_triage: bool, limit: int = RETRIAGE_PER_PASS
-) -> int:
-    """Re-judge works a triage outage deferred; bounded per call to cap model spend."""
+def drain_deferred(conn: sqlite3.Connection, corpus_dir: Path, limit: int = DRAIN_PER_PASS) -> int:
+    """Push works a past triage outage left as 'candidate' through the fetch path."""
     rows = db.deferred_candidates(conn, limit)
     fetched = 0
     for topic_id in dict.fromkeys(int(r["topic_id"]) for r in rows):
@@ -251,16 +234,16 @@ def retriage_deferred(
         if topic is None:
             continue
         cands = [_candidate_from_row(r) for r in rows if r["topic_id"] == topic_id]
-        # judged since deferral under another identifier: retire so it stops taking a slot
+        # recorded since deferral under another identifier: retire so it stops taking a slot
         for c in cands:
             if db.seen(conn, c):
                 db.record_work(conn, c, topic_id, status="rejected", reject_reason="duplicate")
-        _log(f"retriage: {len(cands)} deferred candidates for topic {topic.name}")
-        fetched += process_candidates(conn, topic, _rehydrate(cands), corpus_dir, use_triage)
+        _log(f"drain: {len(cands)} deferred candidates for topic {topic.name}")
+        fetched += process_candidates(conn, topic, _rehydrate(cands), corpus_dir)
     return fetched
 
 
-def expand(conn: sqlite3.Connection, topic: db.Topic, corpus_dir: Path, use_triage: bool) -> None:
+def expand(conn: sqlite3.Connection, topic: db.Topic, corpus_dir: Path) -> None:
     """Depth-1 citation walk from this topic's kept works, through the same gate."""
     ids = db.unexpanded_kept(conn, topic.id, EXPAND_WORKS_PER_PASS)
     for openalex_id in ids:
@@ -274,13 +257,12 @@ def expand(conn: sqlite3.Connection, topic: db.Topic, corpus_dir: Path, use_tria
                 cands.append(work)
             time.sleep(REQUEST_DELAY_S)
         db.set_expanded(conn, openalex_id)
-        process_candidates(conn, topic, _dedupe(cands), corpus_dir, use_triage)
+        process_candidates(conn, topic, _dedupe(cands), corpus_dir)
 
 
 def run_once(
     conn: sqlite3.Connection,
     corpus_dir: Path,
-    use_triage: bool,
     recrawl_days: int,
 ) -> bool:
     """Claim and crawl one topic. Returns False when the queue is empty."""
@@ -290,8 +272,8 @@ def run_once(
     pass_date = datetime.now(UTC).date().isoformat()
     try:
         cands, capped = discover(topic)
-        process_candidates(conn, topic, cands, corpus_dir, use_triage)
-        expand(conn, topic, corpus_dir, use_triage)
+        process_candidates(conn, topic, cands, corpus_dir)
+        expand(conn, topic, corpus_dir)
         if capped:
             # a capped sweep is incomplete: hold the watermark so re-crawls keep
             # paging the same window (dedupe absorbs the overlap) until a full
@@ -321,19 +303,18 @@ def log_pass_summary(conn: sqlite3.Connection) -> None:
 def run_loop(
     conn: sqlite3.Connection,
     corpus_dir: Path,
-    use_triage: bool,
     poll_seconds: int,
     recrawl_days: int,
 ) -> None:
     _log("crawler: draining topic queue")
     while True:
-        idle = not run_once(conn, corpus_dir, use_triage, recrawl_days)
+        idle = not run_once(conn, corpus_dir, recrawl_days)
         if idle:
             # idle time is when deferred works get worked off, not the re-crawl interval
             try:
-                retriage_deferred(conn, corpus_dir, use_triage)
+                drain_deferred(conn, corpus_dir)
             except OSError as e:
-                _log(f"retriage failed ({e})")
+                _log(f"drain failed ({e})")
         log_pass_summary(conn)
         if idle:
             time.sleep(poll_seconds)

@@ -4,6 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# The evidence grade retrieval weights (1 strongest .. 5 weakest) is a pure lookup on
+# study type — never a drop reason. NULL grade means the study type isn't known yet.
+GRADE_BY_STUDY_TYPE = {
+    "meta_analysis": 1,
+    "systematic_review": 1,
+    "rct": 2,
+    "cohort": 3,
+    "case_control": 3,
+    "cross_sectional": 4,
+    "observational": 4,
+    "case_report": 5,
+    "opinion": 5,
+    "qualitative": 5,
+    "other": 5,
+}
+
 
 @dataclass(frozen=True)
 class Candidate:

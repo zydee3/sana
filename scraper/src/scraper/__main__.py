@@ -8,10 +8,9 @@ Topics arrive either via `add-topic` or the SANA_TOPICS env var (bullet lines,
 `- <topic name> (Txxxx)` with an optional OpenAlex topic id), synced into the queue
 at startup — in k3s that env comes from the sana-topics ConfigMap.
 
-Triage runs through Claude Code headless (`claude -p`), so it needs the claude CLI
-on PATH with logged-in credentials; without it papers are kept with
-metadata-derived grades. Config (env): SANA_CORPUS (default ./corpus), SANA_TOPICS,
-CLAUDE_BIN, OPENALEX_API_KEY, POLL_SECONDS, RECRAWL_DAYS, and — for the hourly
+Ingest needs no model: papers are kept as discovered and graded from publisher
+metadata. Config (env): SANA_CORPUS (default ./corpus), SANA_TOPICS,
+OPENALEX_API_KEY, POLL_SECONDS, RECRAWL_DAYS, and — for the hourly
 scraped-count message — DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID (unset = off).
 """
 
@@ -22,7 +21,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import crawl, db, report, triage
+from . import crawl, db, report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,12 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     if recovered:
         print(f"recovered {recovered} topics claimed by a previous worker", flush=True)
     crawl.sync_topics(conn, os.environ.get("SANA_TOPICS", ""))
-    use_triage = triage.available()
-    if not use_triage:
-        print("warning: claude CLI not found; keeping papers with metadata-derived grades")
     recrawl_days = int(os.environ.get("RECRAWL_DAYS", "7"))
     if getattr(args, "once", False):
-        while crawl.run_once(conn, corpus_dir, use_triage, recrawl_days):
+        while crawl.run_once(conn, corpus_dir, recrawl_days):
             pass
         return 0
     token = os.environ.get("DISCORD_BOT_TOKEN")
@@ -69,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         report.start_reporter(corpus_dir / "corpus.db", token, channel_id)
         print("discord reporter started", flush=True)
     poll_seconds = int(os.environ.get("POLL_SECONDS", "300"))
-    crawl.run_loop(conn, corpus_dir, use_triage, poll_seconds, recrawl_days)
+    crawl.run_loop(conn, corpus_dir, poll_seconds, recrawl_days)
     return 0
 
 

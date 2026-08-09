@@ -1,13 +1,12 @@
 """Model triage: relevance + study type from title/abstract, batched per call.
 
+Not in the crawl path — ingest never waits on a model (see crawl.py). This is the
+enrichment side: judging works whose publisher metadata doesn't decide a study type.
+
 Judgment runs through Claude Code headless (`claude -p`) — the same runtime the
 backend uses — so it authenticates with the operator's existing Claude credentials
 (subscription or key) instead of requiring a separate metered API key. The prompt
-demands a bare JSON array; anything else is a TriageError and the caller leaves
-the candidates untriaged for the next pass.
-
-Study type maps to the evidence grade (1 strongest .. 5 weakest) that retrieval
-weights — the grade is never a drop reason.
+demands a bare JSON array; anything else is a TriageError.
 """
 
 from __future__ import annotations
@@ -20,27 +19,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .models import Candidate
+from .models import GRADE_BY_STUDY_TYPE, Candidate
 
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 MODEL = "sonnet"
 BATCH_SIZE = 8
 ABSTRACT_CHARS = 1500
 TIMEOUT_S = 300
-
-GRADE_BY_STUDY_TYPE = {
-    "meta_analysis": 1,
-    "systematic_review": 1,
-    "rct": 2,
-    "cohort": 3,
-    "case_control": 3,
-    "cross_sectional": 4,
-    "observational": 4,
-    "case_report": 5,
-    "opinion": 5,
-    "qualitative": 5,
-    "other": 5,
-}
 
 INSTRUCTIONS = (
     "You triage research papers for the corpus behind a mental-health and wellness "
