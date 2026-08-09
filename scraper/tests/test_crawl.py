@@ -1,9 +1,11 @@
+import email.message
 import sqlite3
+import urllib.error
 from pathlib import Path
 
 import pytest
 
-from scraper import crawl, db, europepmc, pmc_oa
+from scraper import crawl, db, europepmc, openalex, pmc_oa
 from scraper.models import Candidate
 
 
@@ -150,6 +152,95 @@ def test_drain_retires_candidates_recorded_under_another_id(
     row = conn.execute("SELECT status, reject_reason FROM works WHERE work_id = 'doi:10.1/a'")
     assert tuple(row.fetchone()) == ("rejected", "duplicate")
     assert db.deferred_candidates(conn, limit=10) == []
+
+
+def test_run_once_resumes_a_capped_sweep_instead_of_re_reading_its_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = db.connect(tmp_path / "corpus.db")
+    db.add_topic(conn, "sleep", "sleep", "T1")
+    monkeypatch.setattr(crawl, "REQUEST_DELAY_S", 0)
+    oa_cursors: list[str | None] = []
+    ep_cursors: list[str | None] = []
+
+    def fake_oa(
+        topic_id: str, since: str | None, cursor: str | None = None
+    ) -> tuple[list[Candidate], str | None]:
+        oa_cursors.append(cursor)
+        page = len(oa_cursors)
+        return [_cand(f"W{page}")], "oa2" if page == 1 else None
+
+    def fake_ep(
+        query: str, since: str | None, cursor: str | None = None
+    ) -> tuple[list[Candidate], str | None]:
+        ep_cursors.append(cursor)
+        return [], "ep2" if len(ep_cursors) == 1 else None
+
+    monkeypatch.setattr(openalex, "works_by_topic", fake_oa)
+    monkeypatch.setattr(europepmc, "search_window", fake_ep)
+
+    assert crawl.run_once(conn, tmp_path, recrawl_days=7) is True
+    row = conn.execute("SELECT * FROM topics").fetchone()
+    assert (row["openalex_cursor"], row["epmc_cursor"]) == ("oa2", "ep2")
+    assert row["watermark"] is None  # capped sweep never claims a window as covered
+
+    # mid-sweep, so claimable again immediately — and it continues where it stopped
+    assert crawl.run_once(conn, tmp_path, recrawl_days=7) is True
+    assert oa_cursors == [None, "oa2"] and ep_cursors == [None, "ep2"]
+    row = conn.execute("SELECT * FROM topics").fetchone()
+    assert (row["openalex_cursor"], row["epmc_cursor"]) == (None, None)
+    assert row["watermark"] is not None  # full sweep landed
+    assert {r["work_id"] for r in conn.execute("SELECT work_id FROM works")} == {"W1", "W2"}
+
+
+def test_run_once_banks_paging_progress_when_a_later_stage_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = db.connect(tmp_path / "corpus.db")
+    db.add_topic(conn, "sleep", "sleep", "T1")
+    monkeypatch.setattr(crawl, "REQUEST_DELAY_S", 0)
+    monkeypatch.setattr(
+        openalex,
+        "works_by_topic",
+        lambda topic_id, since, cursor=None: ([_cand("W1", openalex_id="W1")], "oa2"),
+    )
+    monkeypatch.setattr(europepmc, "search_window", lambda query, since, cursor=None: ([], None))
+
+    def boom(openalex_id: str) -> list[Candidate]:
+        raise urllib.error.HTTPError("u", 404, "Not Found", email.message.Message(), None)
+
+    monkeypatch.setattr(openalex, "citers", boom)
+
+    assert crawl.run_once(conn, tmp_path, recrawl_days=7) is False
+    # the 404 came from expansion, not from paging: the pages already walked stand
+    row = conn.execute("SELECT * FROM topics").fetchone()
+    assert (row["openalex_cursor"], row["epmc_cursor"]) == ("oa2", None)
+
+
+def test_run_once_keeps_cursors_over_a_blip_but_drops_a_rejected_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = db.connect(tmp_path / "corpus.db")
+    db.add_topic(conn, "sleep", "sleep", "T1")
+    db.set_sweep_cursors(conn, 1, "oa9", "ep9")
+    error: OSError = OSError("name resolution")
+
+    def fake_oa(
+        topic_id: str, since: str | None, cursor: str | None = None
+    ) -> tuple[list[Candidate], str | None]:
+        raise error
+
+    monkeypatch.setattr(openalex, "works_by_topic", fake_oa)
+
+    # a failed pass reports False so the loop backs off instead of retrying at once
+    assert crawl.run_once(conn, tmp_path, recrawl_days=7) is False
+    row = conn.execute("SELECT * FROM topics").fetchone()
+    assert (row["openalex_cursor"], row["epmc_cursor"]) == ("oa9", "ep9")
+
+    error = urllib.error.HTTPError("u", 400, "Bad Request", email.message.Message(), None)
+    crawl.run_once(conn, tmp_path, recrawl_days=7)
+    row = conn.execute("SELECT * FROM topics").fetchone()
+    assert (row["openalex_cursor"], row["epmc_cursor"]) == (None, None)
 
 
 def test_pass_summary_counts_every_status(

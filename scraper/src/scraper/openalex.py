@@ -10,6 +10,7 @@ it to 10,000 ($1/day).
 from __future__ import annotations
 
 import os
+import urllib.error
 import urllib.parse
 from collections.abc import Callable
 from typing import Any
@@ -73,25 +74,31 @@ def works_by_topic(
     fetch: Fetch = get_json,
     per_page: int = 200,
     max_pages: int = 25,
-) -> tuple[list[Candidate], bool]:
-    """One credit per page. Returns (candidates, truncated-by-page-cap)."""
+    cursor: str | None = None,
+) -> tuple[list[Candidate], str | None]:
+    """One credit per page, resuming from `cursor`.
+
+    Returns (candidates, next cursor) — the cursor is None once the result set is
+    exhausted, and otherwise the page the cap stopped at, to resume from later.
+    """
     flt = f"primary_topic.id:{topic_id},is_oa:true"
     if since:
         flt += f",from_publication_date:{since}"
-    cursor = "*"
+    page = cursor or "*"
     out: list[Candidate] = []
     for _ in range(max_pages):
         url = _url(
             "/works",
-            {"filter": flt, "select": SELECT, "per-page": str(per_page), "cursor": cursor},
+            {"filter": flt, "select": SELECT, "per-page": str(per_page), "cursor": page},
         )
         payload = fetch(url)
         results = payload.get("results", [])
         out.extend(from_openalex(r) for r in results if r.get("id"))
-        cursor = payload.get("meta", {}).get("next_cursor")
-        if not cursor or not results:
-            return out, False
-    return out, True
+        nxt = payload.get("meta", {}).get("next_cursor")
+        if not nxt or not results:
+            return out, None
+        page = nxt
+    return out, page
 
 
 def citers(openalex_id: str, fetch: Fetch = get_json, per_page: int = 50) -> list[Candidate]:
@@ -112,8 +119,17 @@ def referenced_ids(openalex_id: str, fetch: Fetch = get_json) -> list[str]:
 
 
 def work_by_id(openalex_id: str, fetch: Fetch = get_json) -> Candidate | None:
-    """Free entity lookup for a single work (used when expanding references)."""
-    payload = fetch(_url(f"/works/{openalex_id}", {"select": SELECT}))
+    """Free entity lookup for a single work (used when expanding references).
+
+    A 404 is an answer, not an outage: referenced_works keeps ids of works that were
+    later merged or withdrawn, and one of those must not fail the whole topic pass.
+    """
+    try:
+        payload = fetch(_url(f"/works/{openalex_id}", {"select": SELECT}))
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        return None
     if not payload or not payload.get("id"):
         return None
     return from_openalex(payload, "citation")

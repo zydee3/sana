@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS topics (
   status TEXT NOT NULL DEFAULT 'pending',
   added_by TEXT NOT NULL DEFAULT 'manual',
   last_crawled_at TEXT,
-  watermark TEXT
+  watermark TEXT,
+  openalex_cursor TEXT,
+  epmc_cursor TEXT
 );
 CREATE TABLE IF NOT EXISTS works (
   work_id TEXT PRIMARY KEY,
@@ -47,6 +49,9 @@ CREATE TABLE IF NOT EXISTS works (
 """
 
 
+TOPIC_COLUMNS = "id, name, query, openalex_id, watermark, openalex_cursor, epmc_cursor"
+
+
 @dataclass(frozen=True)
 class Topic:
     id: int
@@ -54,6 +59,21 @@ class Topic:
     query: str
     openalex_id: str | None
     watermark: str | None
+    # per-source resume points of an unfinished sweep; None means "start at the head"
+    openalex_cursor: str | None = None
+    epmc_cursor: str | None = None
+
+
+def _topic(row: sqlite3.Row) -> Topic:
+    return Topic(
+        row["id"],
+        row["name"],
+        row["query"],
+        row["openalex_id"],
+        row["watermark"],
+        row["openalex_cursor"],
+        row["epmc_cursor"],
+    )
 
 
 def _now_iso(now: datetime | None = None) -> str:
@@ -66,7 +86,17 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns SCHEMA gained after a DB was created (CREATE IF NOT EXISTS won't)."""
+    have = {str(r["name"]) for r in conn.execute("PRAGMA table_info(topics)")}
+    with conn:
+        for col in ("openalex_cursor", "epmc_cursor"):
+            if col not in have:
+                conn.execute(f"ALTER TABLE topics ADD COLUMN {col} TEXT")  # noqa: S608 (literal)
 
 
 def add_topic(
@@ -94,19 +124,25 @@ def recover_active_topics(conn: sqlite3.Connection) -> int:
 def claim_next_topic(
     conn: sqlite3.Connection, recrawl_days: int, now: datetime | None = None
 ) -> Topic | None:
-    """Oldest pending topic, else the stalest done topic past the re-crawl interval."""
+    """Oldest pending topic, else the stalest done topic due for work.
+
+    A topic whose sweep never finished — no watermark yet, or cursors still held — is
+    due immediately: the re-crawl interval paces whole sweeps, and applying it between
+    pages of one sweep would stretch that sweep over months.
+    """
     cutoff = _now_iso((now or datetime.now(UTC)) - timedelta(days=recrawl_days))
     row = conn.execute(
-        """SELECT id, name, query, openalex_id, watermark FROM topics
-           WHERE status = 'pending' OR (status = 'done' AND last_crawled_at < ?)
-           ORDER BY status = 'pending' DESC, last_crawled_at, id LIMIT 1""",
+        f"""SELECT {TOPIC_COLUMNS} FROM topics
+           WHERE status = 'pending' OR (status = 'done' AND (last_crawled_at < ?
+             OR watermark IS NULL OR openalex_cursor IS NOT NULL OR epmc_cursor IS NOT NULL))
+           ORDER BY status = 'pending' DESC, last_crawled_at, id LIMIT 1""",  # noqa: S608 (literal)
         (cutoff,),
     ).fetchone()
     if row is None:
         return None
     with conn:
         conn.execute("UPDATE topics SET status = 'active' WHERE id = ?", (row["id"],))
-    return Topic(row["id"], row["name"], row["query"], row["openalex_id"], row["watermark"])
+    return _topic(row)
 
 
 def finish_topic(
@@ -123,13 +159,26 @@ def finish_topic(
         )
 
 
+def set_sweep_cursors(
+    conn: sqlite3.Connection,
+    topic_id: int,
+    openalex_cursor: str | None,
+    epmc_cursor: str | None,
+) -> None:
+    """Record where a capped sweep stopped, or clear both when it completed."""
+    with conn:
+        conn.execute(
+            "UPDATE topics SET openalex_cursor = ?, epmc_cursor = ? WHERE id = ?",
+            (openalex_cursor, epmc_cursor, topic_id),
+        )
+
+
 def topic_by_id(conn: sqlite3.Connection, topic_id: int) -> Topic | None:
     row = conn.execute(
-        "SELECT id, name, query, openalex_id, watermark FROM topics WHERE id = ?", (topic_id,)
+        f"SELECT {TOPIC_COLUMNS} FROM topics WHERE id = ?",  # noqa: S608 (literal)
+        (topic_id,),
     ).fetchone()
-    if row is None:
-        return None
-    return Topic(row["id"], row["name"], row["query"], row["openalex_id"], row["watermark"])
+    return _topic(row) if row is not None else None
 
 
 def deferred_candidates(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:

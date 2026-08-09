@@ -38,10 +38,26 @@ def test_search_window_adds_idate_clause_and_pages() -> None:
             return {"resultList": {"result": [RECORD]}, "nextCursorMark": "c2"}
         return {"resultList": {"result": []}, "nextCursorMark": "c2"}
 
-    cands, truncated = europepmc.search_window("mindfulness", "2026-07-01", fetch=fetch)
-    assert len(cands) == 1 and truncated is False
+    cands, next_cursor = europepmc.search_window("mindfulness", "2026-07-01", fetch=fetch)
+    assert len(cands) == 1 and next_cursor is None
     assert "FIRST_IDATE%3A%5B2026-07-01+TO+%2A%5D" in urls[0]
     assert "cursorMark=c2" in urls[1]
+
+
+def test_search_window_returns_the_cap_cursor_and_resumes_from_it() -> None:
+    urls: list[str] = []
+
+    def fetch(url: str) -> Any:
+        urls.append(url)
+        return {"resultList": {"result": [RECORD]}, "nextCursorMark": f"c{len(urls) + 1}"}
+
+    _, next_cursor = europepmc.search_window("mindfulness", None, fetch=fetch, max_pages=2)
+    assert next_cursor == "c3"
+    assert "cursorMark=%2A" in urls[0]
+
+    urls.clear()
+    europepmc.search_window("mindfulness", None, fetch=fetch, max_pages=1, cursor="c3")
+    assert "cursorMark=c3" in urls[0]
 
 
 def test_pmcids_for_dois_batches_and_lowercases() -> None:

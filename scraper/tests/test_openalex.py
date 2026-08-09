@@ -1,4 +1,8 @@
+import email.message
+import urllib.error
 from typing import Any
+
+import pytest
 
 from scraper import openalex
 
@@ -39,20 +43,28 @@ def test_works_by_topic_pages_until_cursor_ends() -> None:
         page2 = [{**WORK, "id": "https://openalex.org/W2"}]
         return {"results": page2, "meta": {"next_cursor": None}}
 
-    cands, truncated = openalex.works_by_topic("T10272", "2026-07-01", fetch=fetch)
+    cands, next_cursor = openalex.works_by_topic("T10272", "2026-07-01", fetch=fetch)
     assert [c.work_id for c in cands] == ["W2109631588", "W2"]
-    assert truncated is False
+    assert next_cursor is None
     assert "primary_topic.id%3AT10272" in urls[0]
     assert "from_publication_date%3A2026-07-01" in urls[0]
     assert "cursor=abc" in urls[1]
 
 
-def test_works_by_topic_reports_page_cap() -> None:
-    def fetch(url: str) -> Any:
-        return {"results": [WORK], "meta": {"next_cursor": "more"}}
+def test_works_by_topic_returns_the_cap_cursor_and_resumes_from_it() -> None:
+    urls: list[str] = []
 
-    _, truncated = openalex.works_by_topic("T10272", None, fetch=fetch, max_pages=2)
-    assert truncated is True
+    def fetch(url: str) -> Any:
+        urls.append(url)
+        return {"results": [WORK], "meta": {"next_cursor": f"page{len(urls) + 1}"}}
+
+    _, next_cursor = openalex.works_by_topic("T10272", None, fetch=fetch, max_pages=2)
+    assert next_cursor == "page3"
+    assert "cursor=%2A" in urls[0]  # a fresh sweep starts at "*"
+
+    urls.clear()
+    openalex.works_by_topic("T10272", None, fetch=fetch, max_pages=1, cursor="page3")
+    assert "cursor=page3" in urls[0]
 
 
 def test_referenced_ids_shortens_urls() -> None:
@@ -60,3 +72,15 @@ def test_referenced_ids_shortens_urls() -> None:
         return {"referenced_works": ["https://openalex.org/W1", "https://openalex.org/W2"]}
 
     assert openalex.referenced_ids("W9", fetch=fetch) == ["W1", "W2"]
+
+
+def test_work_by_id_treats_a_missing_work_as_absent_not_broken() -> None:
+    def gone(url: str) -> Any:
+        raise urllib.error.HTTPError(url, 404, "Not Found", email.message.Message(), None)
+
+    def refused(url: str) -> Any:
+        raise urllib.error.HTTPError(url, 403, "Forbidden", email.message.Message(), None)
+
+    assert openalex.work_by_id("W1", fetch=gone) is None
+    with pytest.raises(urllib.error.HTTPError):
+        openalex.work_by_id("W1", fetch=refused)

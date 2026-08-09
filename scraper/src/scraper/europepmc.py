@@ -47,16 +47,18 @@ def search_window(
     fetch: Fetch = get_json,
     page_size: int = 500,
     max_pages: int = 10,
-) -> tuple[list[Candidate], bool]:
+    cursor: str | None = None,
+) -> tuple[list[Candidate], str | None]:
     """Open-access hits for a topic query, incremental via FIRST_IDATE windows.
 
-    Returns (candidates, truncated-by-page-cap). cursorMark pages through deep
-    result sets (verified up to pageSize=1000).
+    Returns (candidates, next cursorMark) — None once the result set is exhausted,
+    otherwise the mark the page cap stopped at, to resume from later. cursorMark
+    pages through deep result sets (verified up to pageSize=1000).
     """
     q = f"({query}) AND IN_EPMC:Y AND OPEN_ACCESS:Y"
     if since:
         q += f" AND FIRST_IDATE:[{since} TO *]"
-    cursor = "*"
+    page = cursor or "*"
     out: list[Candidate] = []
     for _ in range(max_pages):
         params = urllib.parse.urlencode(
@@ -65,17 +67,17 @@ def search_window(
                 "format": "json",
                 "pageSize": page_size,
                 "resultType": "core",
-                "cursorMark": cursor,
+                "cursorMark": page,
             }
         )
         payload = fetch(f"{SEARCH_URL}?{params}")
         results = payload.get("resultList", {}).get("result", [])
         out.extend(from_epmc(r) for r in results if r.get("pmcid") or r.get("doi"))
-        next_cursor = payload.get("nextCursorMark")
-        if not results or not next_cursor or next_cursor == cursor:
-            return out, False
-        cursor = next_cursor
-    return out, True
+        nxt = payload.get("nextCursorMark")
+        if not results or not nxt or nxt == page:
+            return out, None
+        page = nxt
+    return out, page
 
 
 def _search_dois(dois: Iterable[str], result_type: str, fetch: Fetch) -> list[dict[str, Any]]:

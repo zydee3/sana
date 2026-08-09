@@ -38,7 +38,9 @@ topics(
   status TEXT NOT NULL,          -- pending | active | done
   added_by TEXT NOT NULL,        -- taxonomy | backend | manual
   last_crawled_at TEXT,          -- ISO timestamp; drives re-crawl
-  watermark TEXT                 -- newest date seen per source; next pass starts here
+  watermark TEXT,                -- newest date seen per source; next pass starts here
+  openalex_cursor TEXT,          -- resume point of an unfinished sweep; NULL = start at the head
+  epmc_cursor TEXT               -- same, for the Europe PMC cursorMark
 )
 
 works(
@@ -171,8 +173,11 @@ the next pass — caps are recorded, never silent.
   daemon thread; best-effort, never blocks the crawl. Token is copied at deploy time from
   the discord-bot namespace secret; unset disables the reporter.
 - `make deploy` (scraper/ or root): build image → import into k3s containerd → render
-  ConfigMap → apply → restart. A page-capped sweep holds the topic watermark so re-crawls
-  keep re-paging the window until a full sweep completes.
+  ConfigMap → apply → restart. A page cap bounds the work per pass, not the sweep: the
+  stopping cursor of each source is stored on the topic and the pass resumes from it, so
+  a topic mid-sweep is re-claimable immediately and skips the re-crawl interval. The
+  watermark is held until a sweep finishes, so a window is only ever recorded as covered
+  once it truly is. A 4xx on a resumed pass drops the cursors and restarts from the head.
 - Logs to stdout; `kubectl logs` is the interface. Metrics endpoint deferred until the
   backend sets the pattern (`backend.md`).
 

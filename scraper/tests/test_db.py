@@ -43,6 +43,35 @@ def test_claim_finish_and_recrawl(tmp_path: Path) -> None:
     assert stale is not None and stale.watermark == "2026-08-01"
 
 
+def test_topic_without_a_watermark_is_due_however_recently_it_was_crawled(
+    tmp_path: Path,
+) -> None:
+    conn = _conn(tmp_path)
+    db.add_topic(conn, "sleep", "sleep quality", "T1")
+    topic = db.claim_next_topic(conn, recrawl_days=7, now=T0)
+    assert topic is not None
+
+    db.finish_topic(conn, topic.id, None, now=T0)  # capped sweep: no window covered yet
+    assert db.claim_next_topic(conn, recrawl_days=7, now=T0) is not None
+
+
+def test_mid_sweep_topic_is_claimable_before_the_recrawl_interval(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    db.add_topic(conn, "sleep", "sleep quality", "T1")
+    topic = db.claim_next_topic(conn, recrawl_days=7, now=T0)
+    assert topic is not None and topic.openalex_cursor is None
+
+    db.set_sweep_cursors(conn, topic.id, "oa2", None)
+    db.finish_topic(conn, topic.id, None, now=T0)
+
+    resumed = db.claim_next_topic(conn, recrawl_days=7, now=T0)
+    assert resumed is not None and resumed.openalex_cursor == "oa2"
+
+    db.set_sweep_cursors(conn, topic.id, None, None)
+    db.finish_topic(conn, topic.id, "2026-08-01", now=T0)
+    assert db.claim_next_topic(conn, recrawl_days=7, now=T0) is None
+
+
 def test_recover_active_topics_requeues_orphans(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     db.add_topic(conn, "sleep", "sleep")

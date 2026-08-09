@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import time
+import urllib.error
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -92,22 +93,27 @@ def _dedupe(cands: list[Candidate]) -> list[Candidate]:
     return out
 
 
-def discover(topic: db.Topic) -> tuple[list[Candidate], bool]:
-    """All candidates for this topic's window, plus whether a page cap cut it short."""
+def discover(topic: db.Topic) -> tuple[list[Candidate], tuple[str | None, str | None]]:
+    """This pass's candidates, plus each source's resume cursor (None = source exhausted).
+
+    Both sources resume from the topic's stored cursor, so a page cap bounds the work
+    per pass instead of the sweep: successive passes walk deeper into the same result
+    set rather than re-reading its head.
+    """
     cands: list[Candidate] = []
-    capped = False
+    oa_cursor: str | None = None
     if topic.openalex_id:
-        oa, truncated = openalex.works_by_topic(topic.openalex_id, topic.watermark)
+        oa, oa_cursor = openalex.works_by_topic(
+            topic.openalex_id, topic.watermark, cursor=topic.openalex_cursor
+        )
         cands.extend(oa)
-        capped |= truncated
-        if truncated:
+        if oa_cursor:
             _log(f"coverage: openalex page cap hit for topic {topic.name}")
-    ep, truncated = europepmc.search_window(topic.query, topic.watermark)
+    ep, ep_cursor = europepmc.search_window(topic.query, topic.watermark, cursor=topic.epmc_cursor)
     cands.extend(ep)
-    capped |= truncated
-    if truncated:
+    if ep_cursor:
         _log(f"coverage: europepmc page cap hit for topic {topic.name}")
-    return _dedupe(cands), capped
+    return _dedupe(cands), (oa_cursor, ep_cursor)
 
 
 def _study_type(c: Candidate) -> str | None:
@@ -243,6 +249,11 @@ def drain_deferred(conn: sqlite3.Connection, corpus_dir: Path, limit: int = DRAI
     return fetched
 
 
+def _rejected_request(e: OSError) -> bool:
+    """4xx other than rate limiting — the request was bad, retrying it verbatim won't help."""
+    return isinstance(e, urllib.error.HTTPError) and 400 <= e.code < 500 and e.code != 429
+
+
 def expand(conn: sqlite3.Connection, topic: db.Topic, corpus_dir: Path) -> None:
     """Depth-1 citation walk from this topic's kept works, through the same gate."""
     ids = db.unexpanded_kept(conn, topic.id, EXPAND_WORKS_PER_PASS)
@@ -265,30 +276,50 @@ def run_once(
     corpus_dir: Path,
     recrawl_days: int,
 ) -> bool:
-    """Claim and crawl one topic. Returns False when the queue is empty."""
+    """Claim and crawl one topic. Returns False when there was nothing to do or the
+    pass failed — either way the caller should back off before trying again."""
     topic = db.claim_next_topic(conn, recrawl_days)
     if topic is None:
         return False
     pass_date = datetime.now(UTC).date().isoformat()
     try:
-        cands, capped = discover(topic)
+        cands, cursors = discover(topic)
+    except OSError as e:
+        if _rejected_request(e):
+            # a source refusing the request itself is where a cursor it no longer
+            # accepts lands; keeping that cursor would stall the sweep forever
+            db.set_sweep_cursors(conn, topic.id, None, None)
+            _log(f"topic {topic.name}: sweep cursor rejected; restarting from the head")
+        return _fail(conn, topic, e)
+    # bank the paging progress before anything downstream can fail, so a bad fetch
+    # never costs a sweep the pages it already walked
+    db.set_sweep_cursors(conn, topic.id, *cursors)
+    try:
         process_candidates(conn, topic, cands, corpus_dir)
         expand(conn, topic, corpus_dir)
-        if capped:
-            # a capped sweep is incomplete: hold the watermark so re-crawls keep
-            # paging the same window (dedupe absorbs the overlap) until a full
-            # sweep lands — never record a window as covered when a cap cut it
-            _log(f"topic {topic.name}: sweep capped; watermark held")
-            db.finish_topic(conn, topic.id, None)
-        else:
-            # watermark = pass start date; overlap next window absorbed by dedupe
-            db.finish_topic(conn, topic.id, pass_date)
     except OSError as e:
-        # a source being down fails the topic pass, not the process; the old
-        # watermark stands so the missed window is retried at the next re-crawl
-        _log(f"topic {topic.name} failed ({e}); watermark unchanged")
+        return _fail(conn, topic, e)
+    if any(cursors):
+        # a capped sweep is incomplete: hold the watermark so the window is not
+        # recorded as covered, and let the stored cursors carry the next pass on
+        _log(f"topic {topic.name}: sweep capped; resumes from stored cursor")
         db.finish_topic(conn, topic.id, None)
+    else:
+        # watermark = pass start date; overlap next window absorbed by dedupe
+        db.finish_topic(conn, topic.id, pass_date)
     return True
+
+
+def _fail(conn: sqlite3.Connection, topic: db.Topic, e: OSError) -> bool:
+    """A source being down fails the topic pass, not the process.
+
+    The old watermark stands, so the missed window is retried. An unfinished sweep is
+    claimable at once, so report failure and let the caller sleep — otherwise a down
+    (or 429ing) source gets hammered.
+    """
+    _log(f"topic {topic.name} failed ({e}); watermark unchanged")
+    db.finish_topic(conn, topic.id, None)
+    return False
 
 
 def log_pass_summary(conn: sqlite3.Connection) -> None:
