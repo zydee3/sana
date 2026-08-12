@@ -291,11 +291,16 @@ def run_once(
             db.set_sweep_cursors(conn, topic.id, None, None)
             _log(f"topic {topic.name}: sweep cursor rejected; restarting from the head")
         return _fail(conn, topic, e)
-    # bank the paging progress before anything downstream can fail, so a bad fetch
-    # never costs a sweep the pages it already walked
-    db.set_sweep_cursors(conn, topic.id, *cursors)
     try:
         process_candidates(conn, topic, cands, corpus_dir)
+    except OSError as e:
+        # the pages walked here are not stored yet: banking their cursor would move
+        # the sweep past works nothing recorded, so leave it and re-walk the range
+        return _fail(conn, topic, e)
+    # this range is stored, so paging progress can be banked: expansion failing after
+    # it must not cost the sweep the pages it already walked
+    db.set_sweep_cursors(conn, topic.id, *cursors)
+    try:
         expand(conn, topic, corpus_dir)
     except OSError as e:
         return _fail(conn, topic, e)

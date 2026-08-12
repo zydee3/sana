@@ -217,6 +217,32 @@ def test_run_once_banks_paging_progress_when_a_later_stage_fails(
     assert (row["openalex_cursor"], row["epmc_cursor"]) == ("oa2", None)
 
 
+def test_run_once_holds_cursors_when_the_discovered_page_never_gets_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = db.connect(tmp_path / "corpus.db")
+    db.add_topic(conn, "sleep", "sleep", "T1")
+    db.set_sweep_cursors(conn, 1, "oa1", None)
+    monkeypatch.setattr(crawl, "REQUEST_DELAY_S", 0)
+    monkeypatch.setattr(
+        openalex,
+        "works_by_topic",
+        lambda topic_id, since, cursor=None: ([_cand("W1", doi="10.1/a", is_oa=True)], "oa2"),
+    )
+    monkeypatch.setattr(europepmc, "search_window", lambda query, since, cursor=None: ([], None))
+
+    def boom(dois: object) -> dict[str, str]:
+        raise OSError("name resolution")
+
+    monkeypatch.setattr(europepmc, "pmcids_for_dois", boom)
+
+    assert crawl.run_once(conn, tmp_path, recrawl_days=7) is False
+    # nothing from this page reached works, so the sweep must re-walk it, not skip it
+    row = conn.execute("SELECT * FROM topics").fetchone()
+    assert (row["openalex_cursor"], row["epmc_cursor"]) == ("oa1", None)
+    assert conn.execute("SELECT COUNT(*) FROM works").fetchone()[0] == 0
+
+
 def test_run_once_keeps_cursors_over_a_blip_but_drops_a_rejected_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
