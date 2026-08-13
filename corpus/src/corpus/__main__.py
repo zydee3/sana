@@ -8,11 +8,12 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import backfill, chunk, compare, db, epmc, judge, sample
+from . import backfill, chunk, compare, db, embed, epmc, judge, sample
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
 
@@ -109,6 +110,83 @@ def cmd_chunk(args: argparse.Namespace) -> int:
     if total:
         _log(f"corpus chunks: {total} total, mean {mean:.0f} words, range {low}-{high}")
         _log(f"  by section: {sections}")
+    return 0
+
+
+def cmd_embed_bench(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db, read_only=True)
+    texts = [t for _, t in embed.load_chunks(conn, args.n)]
+    _log(f"benchmarking {len(texts)} chunks on {len(args.models)} models")
+    for name in args.models:
+        spec = embed.MODELS[name]
+        embed.ensure_model(spec, _log)
+        stats = embed.token_stats(spec, texts)
+        _log(f"{name} tokens: {json.dumps({k: round(v, 3) for k, v in stats.items()})}")
+        for workers in args.workers:
+            r = embed.bench(spec, texts, workers=workers, threads=args.threads)
+            rate = f"{r.per_second:.0f} chunks/s ({r.seconds:.1f}s)"
+            _log(f"  {name} {workers}x{args.threads}: {rate}")
+    return 0
+
+
+def cmd_embed(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db, read_only=True)
+    embed.embed_all(
+        conn,
+        embed.MODELS[args.model],
+        _log,
+        workers=args.workers,
+        threads=args.threads,
+        limit=args.limit,
+    )
+    return 0
+
+
+def _read_queries(path: Path) -> list[str]:
+    lines = path.read_text().splitlines()
+    return [q.strip() for q in lines if q.strip() and not q.startswith("#")]
+
+
+def cmd_retrieve(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db, read_only=True)
+    spec = embed.MODELS[args.model]
+    vecs, ids = embed.load_vectors(args.model)
+    queries = [args.query] if args.query else _read_queries(args.queries)
+    embedder = embed.Embedder(spec, threads=args.threads)
+    latencies: list[float] = []
+    results = []
+    for q in queries:
+        start = time.monotonic()
+        qv = embedder.encode([q], is_query=True)[0]
+        hits = embed.search(qv, vecs, ids, args.k)
+        latencies.append((time.monotonic() - start) * 1000)
+        rows = []
+        for chunk_id, score in hits:
+            r = conn.execute(
+                "SELECT c.work_id, c.section, c.text, w.title, w.relevance, w.domain, w.year "
+                "FROM chunks c JOIN works w USING (work_id) WHERE c.chunk_id = ?",
+                (chunk_id,),
+            ).fetchone()
+            rows.append(
+                {
+                    "chunk_id": chunk_id,
+                    "score": round(score, 4),
+                    "work_id": r[0],
+                    "section": r[1],
+                    "title": r[3],
+                    "relevance": r[4],
+                    "domain": r[5],
+                    "year": r[6],
+                    "text": r[2] if args.full else r[2][:400],
+                }
+            )
+        results.append({"query": q, "hits": rows})
+        _log(f"{q[:60]!r}: top score {hits[0][1]:.3f}" if hits else f"{q!r}: no hits")
+    lat = sorted(latencies)
+    _log(f"query p50 {lat[len(lat) // 2]:.1f}ms max {lat[-1]:.1f}ms over {len(ids)} vectors")
+    if args.out:
+        args.out.write_text(json.dumps(results, indent=1))
+        _log(f"wrote {args.out}")
     return 0
 
 
@@ -219,6 +297,30 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--workers", type=int, default=8)
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
     s.set_defaults(func=cmd_chunk)
+
+    s = sub.add_parser("embed-bench", help="throughput + tokenization stats per candidate model")
+    s.add_argument("--models", nargs="+", default=list(embed.MODELS), choices=list(embed.MODELS))
+    s.add_argument("--n", type=int, default=2000, help="chunks to embed per configuration")
+    s.add_argument("--workers", nargs="+", type=int, default=[1, 8, 20, 40])
+    s.add_argument("--threads", type=int, default=1, help="ONNX intra-op threads per worker")
+    s.set_defaults(func=cmd_embed_bench)
+
+    s = sub.add_parser("embed", help="embed every chunk into a vectors file")
+    s.add_argument("--model", default="bge-small", choices=list(embed.MODELS))
+    s.add_argument("--workers", type=int, default=20)
+    s.add_argument("--threads", type=int, default=1)
+    s.add_argument("--limit", type=int, default=None)
+    s.set_defaults(func=cmd_embed)
+
+    s = sub.add_parser("retrieve", help="exact top-k search over a vectors file")
+    s.add_argument("--model", default="bge-small", choices=list(embed.MODELS))
+    s.add_argument("--query", default=None)
+    s.add_argument("--queries", type=Path, default=None, help="one query per line")
+    s.add_argument("--k", type=int, default=10)
+    s.add_argument("--threads", type=int, default=8)
+    s.add_argument("--full", action="store_true", help="dump whole chunk text, not a preview")
+    s.add_argument("--out", type=Path, default=None)
+    s.set_defaults(func=cmd_retrieve)
 
     s = sub.add_parser("classify", help="score relevance + labels with claude -p")
     s.add_argument("--sample", type=Path, required=True)

@@ -5,7 +5,11 @@ description = "Turns the scraped corpus into retrieval-ready data: relevance sco
 requires-python = ">=3.12"
 # Unlike scraper/, this project may take deps (embedding runtimes, vector index);
 # none needed yet — stdlib covers sampling, HTTP and the model calls.
-dependencies = []
+dependencies = [
+    "numpy",
+    "onnxruntime",
+    "tokenizers",
+]
 
 [dependency-groups]
 dev = ["ruff>=0.6", "mypy>=1.11", "pytest>=8"]
@@ -27,6 +31,10 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 strict = true
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = "onnxruntime.*"  # no py.typed marker upstream
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
