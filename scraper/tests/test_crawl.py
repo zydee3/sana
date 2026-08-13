@@ -30,12 +30,14 @@ def test_parse_topics_reads_bullets_and_ignores_prose() -> None:
         "- mental health treatment and access (T10272)\n"
         "- sleep quality\n"
         "  - resilience and mental health (T11761)\n"
+        '- pain (T3) :: TITLE_ABS:"chronic pain"\n'
         "-not a bullet\n"
     )
     assert crawl.parse_topics(text) == [
-        ("mental health treatment and access", "T10272"),
-        ("sleep quality", None),
-        ("resilience and mental health", "T11761"),
+        ("mental health treatment and access", "T10272", None),
+        ("sleep quality", None, None),
+        ("resilience and mental health", "T11761", None),
+        ("pain", "T3", 'TITLE_ABS:"chronic pain"'),
     ]
 
 
@@ -49,6 +51,18 @@ def test_sync_topics_is_idempotent(tmp_path: Path) -> None:
         ("sleep quality", "T1", "config"),
         ("anxiety", None, "config"),
     ]
+
+
+def test_sync_topics_repoints_a_changed_query_and_restarts_the_sweep(tmp_path: Path) -> None:
+    conn = db.connect(tmp_path / "corpus.db")
+    crawl.sync_topics(conn, "- sleep quality (T1)\n")
+    db.set_sweep_cursors(conn, 1, "oa-mark", "ep-mark")
+    db.finish_topic(conn, 1, "2026-08-01")
+
+    crawl.sync_topics(conn, '- sleep quality (T1) :: TITLE_ABS:"sleep quality"\n')
+    row = conn.execute("SELECT query, epmc_cursor, watermark FROM topics").fetchone()
+    assert row["query"] == 'TITLE_ABS:"sleep quality"'
+    assert row["epmc_cursor"] is None and row["watermark"] is None
 
 
 def test_dedupe_joins_on_any_identifier() -> None:

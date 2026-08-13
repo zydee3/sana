@@ -28,6 +28,14 @@ def test_add_topic_idempotent(tmp_path: Path) -> None:
     assert count == 1
 
 
+def test_set_topic_query_only_reports_real_changes(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    db.add_topic(conn, "sleep", "sleep quality", "T1")
+    assert db.set_topic_query(conn, "sleep", "sleep quality") is False
+    assert db.set_topic_query(conn, "sleep", 'TITLE_ABS:"sleep quality"') is True
+    assert conn.execute("SELECT query FROM topics").fetchone()[0] == 'TITLE_ABS:"sleep quality"'
+
+
 def test_claim_finish_and_recrawl(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     db.add_topic(conn, "sleep", "sleep quality", "T1")

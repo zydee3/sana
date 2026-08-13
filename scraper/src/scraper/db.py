@@ -114,6 +114,22 @@ def add_topic(
         )
 
 
+def set_topic_query(conn: sqlite3.Connection, name: str, query: str) -> bool:
+    """Point a topic at a new query, restarting its sweep. True when it changed.
+
+    Cursors and the watermark are positions inside the old query's result set, so a
+    new query invalidates them; cleared, the next pass walks the new set from its
+    head. Re-seeing an already-stored work is a no-op (work_id is the key).
+    """
+    with conn:
+        cur = conn.execute(
+            "UPDATE topics SET query = ?, openalex_cursor = NULL, epmc_cursor = NULL,"
+            " watermark = NULL WHERE name = ? AND query != ?",
+            (query, name, query),
+        )
+    return cur.rowcount > 0
+
+
 def recover_active_topics(conn: sqlite3.Connection) -> int:
     """Re-queue topics a killed worker left claimed. Startup-only: single writer."""
     with conn:

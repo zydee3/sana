@@ -60,21 +60,29 @@ def _log(msg: str) -> None:
 _TOPIC_LINE = re.compile(r"^-\s+(.+?)(?:\s+\((T\d+)\))?\s*$")
 
 
-def parse_topics(text: str) -> list[tuple[str, str | None]]:
-    """Bullet lines -> (name, openalex_id|None); anything else (headings, prose) ignored."""
+def parse_topics(text: str) -> list[tuple[str, str | None, str | None]]:
+    """Bullet lines -> (name, openalex_id|None, epmc query|None); prose ignored.
+
+    Everything after a `::` is the Europe PMC query for that topic, which lets a
+    line name a topic in prose while searching in field-scoped syntax. Without it
+    the name is the query, which searches every field including reference lists.
+    """
     out = []
     for line in text.splitlines():
-        m = _TOPIC_LINE.match(line.strip())
+        head, sep, query = line.strip().partition("::")
+        m = _TOPIC_LINE.match(head.strip())
         if m:
-            out.append((m.group(1), m.group(2)))
+            out.append((m.group(1), m.group(2), query.strip() if sep else None))
     return out
 
 
 def sync_topics(conn: sqlite3.Connection, text: str) -> int:
-    """Enqueue every configured topic; re-adding existing names is a no-op."""
+    """Enqueue every configured topic, and re-point ones whose query changed."""
     topics = parse_topics(text)
-    for name, openalex_id in topics:
-        db.add_topic(conn, name, name, openalex_id, added_by="config")
+    for name, openalex_id, query in topics:
+        db.add_topic(conn, name, query or name, openalex_id, added_by="config")
+        if db.set_topic_query(conn, name, query or name):
+            _log(f"config: topic {name} re-pointed at a new query, sweep restarted")
     if topics:
         _log(f"config: {len(topics)} topics synced")
     return len(topics)
