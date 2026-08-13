@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import backfill, chunk, compare, db, embed, epmc, judge, sample
+from . import backfill, chunk, compare, db, embed, epmc, index, judge, sample
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
 
@@ -190,6 +190,26 @@ def cmd_retrieve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_index_bench(args: argparse.Namespace) -> int:
+    spec = embed.MODELS[args.model]
+    vecs, _ids = embed.load_vectors(args.model)
+    queries = _read_queries(args.queries)
+    qv = embed.Embedder(spec, threads=1).encode(queries, is_query=True)
+    _log(f"{len(vecs)} vectors ({spec.name}, dim {vecs.shape[1]}), {len(queries)} golden queries")
+    rows: list[index.BenchRow] = []
+    for n in args.scales:
+        at_scale = index.synthetic(vecs, n) if n != len(vecs) else vecs
+        kind = "real" if n <= len(vecs) else "synthetic (jittered copies)"
+        _log(f"--- n={len(at_scale)} {kind} ---")
+        rows.extend(
+            index.bench(at_scale, qv, _log, backends=args.backends, k=args.k, reps=args.reps)
+        )
+    if args.out:
+        index.write_results(rows, args.out)
+        _log(f"wrote {args.out}")
+    return 0
+
+
 def _with_abstracts(conn: sqlite3.Connection, papers: list[Paper], *, require: bool) -> list[Paper]:
     ids = [p.work_id for p in papers]
     text: dict[str, str] = {}
@@ -321,6 +341,24 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--full", action="store_true", help="dump whole chunk text, not a preview")
     s.add_argument("--out", type=Path, default=None)
     s.set_defaults(func=cmd_retrieve)
+
+    s = sub.add_parser("index-bench", help="sqlite-vec vs FAISS on the stored vectors")
+    s.add_argument("--model", default="minilm-int8", choices=list(embed.MODELS))
+    s.add_argument("--queries", type=Path, required=True, help="one query per line")
+    s.add_argument(
+        "--scales",
+        nargs="+",
+        type=int,
+        default=[39693],
+        help="vector counts to test; above the stored count the set is synthetic",
+    )
+    s.add_argument(
+        "--backends", nargs="+", default=list(index.BUILDERS), choices=list(index.BUILDERS)
+    )
+    s.add_argument("--k", type=int, default=10)
+    s.add_argument("--reps", type=int, default=5, help="timing repetitions per query")
+    s.add_argument("--out", type=Path, default=None)
+    s.set_defaults(func=cmd_index_bench)
 
     s = sub.add_parser("classify", help="score relevance + labels with claude -p")
     s.add_argument("--sample", type=Path, required=True)

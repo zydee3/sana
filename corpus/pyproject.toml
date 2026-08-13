@@ -6,8 +6,10 @@ requires-python = ">=3.12"
 # Unlike scraper/, this project may take deps (embedding runtimes, vector index);
 # none needed yet — stdlib covers sampling, HTTP and the model calls.
 dependencies = [
+    "faiss-cpu>=1.15.0",
     "numpy",
     "onnxruntime",
+    "sqlite-vec>=0.1.9",
     "tokenizers",
 ]
 
@@ -33,7 +35,7 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = "onnxruntime.*"  # no py.typed marker upstream
+module = ["onnxruntime.*", "faiss.*", "sqlite_vec.*"]  # no py.typed marker upstream
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
