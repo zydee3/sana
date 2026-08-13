@@ -103,6 +103,18 @@ def test_pending_skips_judged_and_non_kept_rows() -> None:
     assert judge.pending_ids(conn) == ["W1"]
 
 
+def test_pending_can_be_restricted_to_one_stratum() -> None:
+    conn = _conn()
+    _work(conn, "W1", discovered_via="openalex")
+    _work(conn, "W2", discovered_via="citation")
+    _work(conn, "W3", discovered_via="europepmc")
+    _work(conn, "W4", discovered_via="openalex", status="kept_miss")
+    assert sorted(judge.pending_ids(conn, via=["openalex", "citation"], status="kept_text")) == [
+        "W1",
+        "W2",
+    ]
+
+
 def test_store_keeps_a_publisher_study_type_and_says_so() -> None:
     conn = _conn()
     _work(conn, "W1", study_type="rct")

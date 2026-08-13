@@ -88,8 +88,22 @@ def wait_for_quota(log: Log, sleep: Callable[[float], None] = time.sleep) -> flo
     return slept
 
 
-def pending_ids(conn: sqlite3.Connection, seed: int = 7) -> list[str]:
-    rows = conn.execute(f"SELECT work_id {_PENDING} ORDER BY work_id").fetchall()
+def pending_ids(
+    conn: sqlite3.Connection,
+    seed: int = 7,
+    *,
+    via: Sequence[str] | None = None,
+    status: str | None = None,
+) -> list[str]:
+    """Pending ids, shuffled. `via`/`status` restrict a run to one discovery stratum."""
+    where, params = _PENDING, []
+    if via:
+        where += f" AND discovered_via IN ({','.join('?' * len(via))})"
+        params += list(via)
+    if status:
+        where += " AND status = ?"
+        params.append(status)
+    rows = conn.execute(f"SELECT work_id {where} ORDER BY work_id", params).fetchall()
     ids = [str(r[0]) for r in rows]
     random.Random(seed).shuffle(ids)
     return ids
@@ -156,9 +170,11 @@ def run(
     limit: int | None = None,
     seed: int = 7,
     brake: int = FAILURE_BRAKE,
+    via: Sequence[str] | None = None,
+    status: str | None = None,
 ) -> tuple[int, int]:
     """Judge pending works until none are left (or `limit` are done). Returns (done, failed)."""
-    ids = pending_ids(conn, seed)[:limit]
+    ids = pending_ids(conn, seed, via=via, status=status)[:limit]
     batches = [ids[i : i + batch_size] for i in range(0, len(ids), batch_size)]
     log(f"judging {len(ids)} pending works in {len(batches)} batches, {workers} workers, {model}")
     done = failed = streak = 0

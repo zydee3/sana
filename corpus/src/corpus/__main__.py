@@ -82,6 +82,8 @@ def cmd_judge(args: argparse.Namespace) -> int:
         workers=args.workers,
         batch_size=args.batch,
         limit=args.limit,
+        via=args.via,
+        status=args.status,
     )
     dist = dict(
         conn.execute(
@@ -310,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--workers", type=int, default=4)
     s.add_argument("--batch", type=int, default=BATCH_SIZE)
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.add_argument("--via", nargs="+", default=None, help="only these discovery sources")
+    s.add_argument("--status", default=None, help="only this kept status")
     s.set_defaults(func=cmd_judge)
 
     s = sub.add_parser("chunk", help="clean + section-aware chunk stored texts (resumable)")
