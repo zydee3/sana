@@ -12,7 +12,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import compare, db, epmc, sample
+from . import backfill, compare, db, epmc, judge, sample
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
 
@@ -46,21 +46,49 @@ def cmd_abstracts(args: argparse.Namespace) -> int:
     for start in range(0, len(todo), epmc.BATCH):
         batch = todo[start : start + epmc.BATCH]
         got = epmc.fetch_abstracts(batch)
-        rows = [
-            (p.work_id, got.get(p.work_id), "epmc" if p.work_id in got else "missing", _now())
-            for p in batch
-        ]
-        conn.executemany(
-            "INSERT INTO abstracts (work_id, abstract, source, fetched_at) VALUES (?,?,?,?)"
-            " ON CONFLICT(work_id) DO UPDATE SET abstract=excluded.abstract,"
-            " source=excluded.source, fetched_at=excluded.fetched_at",
-            rows,
+        backfill.store(
+            conn,
+            [
+                (p.work_id, got.get(p.work_id), "epmc" if p.work_id in got else "missing")
+                for p in batch
+            ],
         )
-        conn.commit()
         found += len(got)
         _log(f"  {start + len(batch)}/{len(todo)} fetched, {found} with abstracts")
     _log(f"done: {found}/{len(todo)} abstracts stored")
     return 0
+
+
+def cmd_backfill(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    if args.phase in ("text", "all"):
+        backfill.text_pass(conn, _log, args.limit)
+    if args.phase in ("epmc", "all"):
+        backfill.epmc_pass(conn, _log, args.workers, args.limit)
+    if args.phase == "all":
+        backfill.mark_missing(conn, _log)
+    rows = conn.execute("SELECT source, count(*) FROM abstracts GROUP BY 1").fetchall()
+    _log(f"abstracts by source: {dict(rows)}")
+    return 0
+
+
+def cmd_judge(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    done, failed = judge.run(
+        conn,
+        _log,
+        model=args.model,
+        workers=args.workers,
+        batch_size=args.batch,
+        limit=args.limit,
+    )
+    dist = dict(
+        conn.execute(
+            "SELECT relevance, count(*) FROM works WHERE relevance IS NOT NULL GROUP BY 1"
+        ).fetchall()
+    )
+    _log(f"corpus relevance histogram: {dist}")
+    return 1 if failed and not done else 0
 
 
 def _with_abstracts(conn: sqlite3.Connection, papers: list[Paper], *, require: bool) -> list[Paper]:
@@ -151,6 +179,19 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("abstracts", help="rehydrate abstracts from Europe PMC into corpus.db")
     s.add_argument("--sample", type=Path, required=True)
     s.set_defaults(func=cmd_abstracts)
+
+    s = sub.add_parser("backfill", help="abstracts for every kept work (local text, then EPMC)")
+    s.add_argument("--phase", choices=("text", "epmc", "all"), default="all")
+    s.add_argument("--workers", type=int, default=4)
+    s.add_argument("--limit", type=int, default=None, help="cap works per phase (for smoke runs)")
+    s.set_defaults(func=cmd_backfill)
+
+    s = sub.add_parser("judge", help="full relevance + label run into corpus.db (resumable)")
+    s.add_argument("--model", default="sonnet")
+    s.add_argument("--workers", type=int, default=4)
+    s.add_argument("--batch", type=int, default=BATCH_SIZE)
+    s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.set_defaults(func=cmd_judge)
 
     s = sub.add_parser("classify", help="score relevance + labels with claude -p")
     s.add_argument("--sample", type=Path, required=True)
