@@ -14,7 +14,9 @@ def _conn() -> sqlite3.Connection:
 
 
 def _para(words: int, word: str = "sleep") -> str:
-    return " ".join([word] * words)
+    # Function words matter: the cleaner's prose test also guards the packed chunk.
+    filler = (word, "of", "the", "patients")
+    return " ".join(filler[i % len(filler)] for i in range(words))
 
 
 def test_chunks_never_cross_a_section() -> None:
@@ -92,3 +94,10 @@ def test_below_threshold_works_are_not_pending() -> None:
     conn.execute("UPDATE works SET relevance = 4 WHERE work_id = 'W3'")
     conn.commit()
     assert chunk.pending(conn, 5, None) == []
+
+
+def test_packed_run_of_non_prose_lines_is_dropped() -> None:
+    # Each line is short enough that clean() exempts it, but together they pack into a
+    # chunk that is plainly not prose.
+    lines = [Block("methods", None, "Writing - review & editing: Park JE, Baek CH.")] * 8
+    assert chunk.chunk_blocks("w", lines) == []

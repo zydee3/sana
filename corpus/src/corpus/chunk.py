@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .clean import Block, clean
+from .clean import Block, clean, is_prose
 
 TEXTS_DIR = Path(os.environ.get("SANA_TEXTS_DIR", "/sana-data/corpus/texts"))
 
@@ -101,8 +101,12 @@ def chunk_blocks(
 
     def flush() -> None:
         nonlocal buf, size
-        if buf and size >= min_words and section is not None:
-            chunks.append(Chunk(work_id, len(chunks), section, heading, " ".join(buf), size))
+        text = " ".join(buf)
+        # The prose test runs again here because clean() exempts short blocks from it,
+        # and a run of short non-prose lines (a contributor list, an answer scale) packs
+        # into a chunk long enough to judge.
+        if buf and size >= min_words and section is not None and is_prose(text):
+            chunks.append(Chunk(work_id, len(chunks), section, heading, text, size))
         buf, size = [], 0
 
     for block in blocks:

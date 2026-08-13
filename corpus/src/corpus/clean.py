@@ -10,6 +10,12 @@ sections (references, acknowledgements, funding, ethics, …) identified by thei
 heading, tab-delimited table rows, and stray numbered reference lines in files whose
 reference list has no heading. Median byte reduction on the pilot set is 39%.
 
+What survives those structural rules is text that reads as a paragraph but is not
+prose — a quoted PubMed search strategy, a questionnaire answer scale, a space-aligned
+table — and it was taking golden-query top-10 slots. A block is kept only if it looks
+like English prose (function-word share); a LaTeX equation blob is cut out in place,
+since the prose around it is real.
+
 Sections are canonicalised to abstract/introduction/methods/results/discussion/
 conclusion so a chunk can be filtered or weighted by where in the paper it came from.
 A non-canonical heading inherits its parent section ("Survey Data" under "Methods"),
@@ -93,6 +99,27 @@ REF_LINE_CHARS = 60
 REF_BLOCK_SHARE = 0.6
 TABLE_TABS = 2
 
+# Non-prose that survives the structural rules and still reaches the embedder, in the
+# order it was found ranking in golden-query top-10s: a quoted PubMed search strategy,
+# a bare questionnaire answer scale, and table rows whose file used spaces, not tabs.
+# The LaTeX blob is different — it sits inside real prose, so it is cut out, not
+# grounds for dropping the block.
+_LATEX_BLOB = re.compile(r"\\documentclass.*?\\end\{document\}", re.S)
+_FIELD_TAG = re.compile(r"\[\s*(title/abstract|mesh terms?|tiab|all fields)\s*\]", re.I)
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+QUERY_TAGS = 2  # per sentence; one is a passing mention, a run of them is the strategy
+_CHECKBOX = re.compile(r"[(\[]\s*[)\]]")
+CHECKBOXES = 4
+
+# English function words: prose runs ~30% of them, a table row or a scale near zero.
+# Short blocks are exempt — the share is noise below a paragraph's worth of words.
+STOPWORDS = frozenset(
+    "the of and in to a was were is are for with that this we our by on as at from be"
+    " been between than not it its these those their has have had".split()
+)
+MIN_STOPWORD_SHARE = 0.08
+PROSE_MIN_WORDS = 25
+
 
 @dataclass(frozen=True)
 class Block:
@@ -152,6 +179,40 @@ def _is_reference_block(lines: list[str]) -> bool:
     return hits >= max(1, len(lines) * REF_BLOCK_SHARE)
 
 
+def strip_latex(text: str) -> str:
+    """Cut the converter's LaTeX preamble+equation blob out of the prose around it."""
+    return _WS.sub(" ", _LATEX_BLOB.sub(" ", text)).strip()
+
+
+def strip_search_strategy(text: str) -> str:
+    """Drop the sentences that are a quoted PubMed query, keep the prose around them.
+
+    Systematic reviews print their search strategy inside Methods, so the block is
+    usually half prose; only the sentences carrying a run of field tags go.
+    """
+    if len(_FIELD_TAG.findall(text)) < QUERY_TAGS:
+        return text
+    kept = [s for s in _SENTENCE.split(text) if len(_FIELD_TAG.findall(s)) < QUERY_TAGS]
+    return " ".join(kept).strip()
+
+
+def stopword_share(text: str) -> float:
+    words = [w.strip(".,;:()[]\"'“”").lower() for w in text.split()]
+    words = [w for w in words if w]
+    if not words:
+        return 0.0
+    return sum(w in STOPWORDS for w in words) / len(words)
+
+
+def is_prose(text: str) -> bool:
+    """False for answer scales and for table rows that reached here without tabs."""
+    if len(_CHECKBOX.findall(text)) >= CHECKBOXES:
+        return False
+    if len(text.split()) < PROSE_MIN_WORDS:
+        return True
+    return stopword_share(text) >= MIN_STOPWORD_SHARE
+
+
 def article_body(raw: str) -> str:
     """Everything after the converter's front-matter rule (whole file if absent)."""
     mark = MARK.search(raw)
@@ -208,7 +269,13 @@ def clean(raw: str) -> tuple[list[Block], Counter[str]]:
         if not prose:
             dropped["table_block"] += 1
             continue
-        text = _WS.sub(" ", " ".join(prose)).strip()
+        text = strip_search_strategy(strip_latex(_WS.sub(" ", " ".join(prose)).strip()))
+        if not text:
+            dropped["search_strategy"] += 1
+            continue
+        if not is_prose(text):
+            dropped["non_prose"] += 1
+            continue
         blocks.append(Block("abstract" if in_abstract else section, heading, text))
         if in_abstract:
             abstract_chars += len(text)
