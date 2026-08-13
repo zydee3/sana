@@ -12,6 +12,11 @@ Quota: `claude -p` spends the operator's subscription, and the loop that owns th
 also needs it. Before every round the runner reads ~/.claude/statusline-latest.json and
 sleeps until reset if either window is above QUOTA_CEILING. A file older than STALE_S
 carries no signal (usually nothing is updating it) and is treated as go, not stop.
+
+That gate cannot see everything — a monthly spend cap makes every call fail instantly
+and appears nowhere in rate_limits — so failure itself is the backstop: FAILURE_BRAKE
+batches failing in a row stops the run. Without it a dead account burns the whole
+pending list in futile spawns (338k works in 74 minutes, observed 2026-08-13).
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ STATUSLINE = Path(os.environ.get("SANA_STATUSLINE", Path.home() / ".claude/statu
 QUOTA_CEILING = 85.0
 STALE_S = 1800.0
 SLEEP_CHUNK_S = 300.0
+FAILURE_BRAKE = 5
 
 Log = Callable[[str], None]
 
@@ -129,14 +135,15 @@ def store_verdicts(conn: sqlite3.Connection, verdicts: Sequence[Verdict], model:
     return len(verdicts)
 
 
-def _judge(papers: Sequence[Paper], model: str) -> list[Verdict]:
-    """One batch, one retry. An empty result leaves the rows NULL for the next run."""
+def _judge(papers: Sequence[Paper], model: str) -> tuple[list[Verdict], str]:
+    """One batch, one retry. Returns (verdicts, last error); empty leaves the rows NULL."""
+    error = ""
     for _ in range(2):
         try:
-            return classify_batch(papers, model)
-        except ClassifyError:
-            continue
-    return []
+            return classify_batch(papers, model), ""
+        except ClassifyError as e:
+            error = str(e)
+    return [], error
 
 
 def run(
@@ -148,24 +155,32 @@ def run(
     batch_size: int = 60,
     limit: int | None = None,
     seed: int = 7,
+    brake: int = FAILURE_BRAKE,
 ) -> tuple[int, int]:
     """Judge pending works until none are left (or `limit` are done). Returns (done, failed)."""
     ids = pending_ids(conn, seed)[:limit]
     batches = [ids[i : i + batch_size] for i in range(0, len(ids), batch_size)]
     log(f"judging {len(ids)} pending works in {len(batches)} batches, {workers} workers, {model}")
-    done = failed = 0
+    done = failed = streak = 0
+    last_error = ""
     started = time.time()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for start in range(0, len(batches), workers):
             wait_for_quota(log)
             group = [load_papers(conn, b) for b in batches[start : start + workers]]
-            results = pool.map(lambda b: _judge(b, model), group)
-            for batch, verdicts in zip(group, results, strict=True):
+            results = list(pool.map(lambda b: _judge(b, model), group))
+            for batch, (verdicts, error) in zip(group, results, strict=True):
                 if not verdicts:
                     failed += len(batch)
+                    streak += 1
+                    last_error = error
                     continue
+                streak = 0
                 done += store_verdicts(conn, verdicts, model)
             rate = done / max(1e-9, time.time() - started) * 60
             log(f"  {done}/{len(ids)} judged, {failed} failed, {rate:.0f} papers/min")
+            if streak >= brake:
+                log(f"brake: {streak} batches failed in a row, stopping. last error: {last_error}")
+                break
     log(f"run done: {done} judged, {failed} left for the next run")
     return done, failed

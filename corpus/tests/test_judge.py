@@ -148,5 +148,41 @@ def test_a_batch_that_fails_twice_is_left_pending(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(judge, "classify_batch", boom)
     paper = Paper("W1", "t", 2020, None, None, "europepmc", "kept_text", None, "s")
-    assert judge._judge([paper], "sonnet") == []
+    assert judge._judge([paper], "sonnet") == ([], "nope")
     assert calls == ["sonnet", "sonnet"]
+
+
+def test_the_brake_stops_a_run_whose_batches_all_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _conn()
+    for i in range(60):
+        _work(conn, f"W{i}")
+    calls: list[int] = []
+
+    def boom(papers: list[Paper], model: str) -> list[Verdict]:
+        calls.append(len(papers))
+        raise ClassifyError("You've hit your monthly spend limit")
+
+    monkeypatch.setattr(judge, "classify_batch", boom)
+    monkeypatch.setattr(judge, "wait_for_quota", lambda *a: 0.0)
+    done, failed = judge.run(conn, lambda _: None, workers=2, batch_size=1, brake=3)
+    assert (done, failed) == (0, 4)  # the round of 2 that trips the brake still finishes
+    assert len(calls) == 8  # 4 batches x one retry each, not all 60
+    assert len(judge.pending_ids(conn)) == 60  # a failed run consumes nothing
+
+
+def test_a_success_resets_the_failure_streak(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _conn()
+    for i in range(6):
+        _work(conn, f"W{i}")
+    seen: list[str] = []
+
+    def flaky(papers: list[Paper], model: str) -> list[Verdict]:
+        seen.append(papers[0].work_id)
+        if len(seen) % 3 == 0:
+            return [Verdict(p.work_id, 5, "sleep", "other", 0.5) for p in papers]
+        raise ClassifyError("transient")
+
+    monkeypatch.setattr(judge, "classify_batch", flaky)
+    monkeypatch.setattr(judge, "wait_for_quota", lambda *a: 0.0)
+    done, failed = judge.run(conn, lambda _: None, workers=1, batch_size=1, brake=2)
+    assert done > 0 and done + failed == 6  # never tripped: every other batch succeeds
