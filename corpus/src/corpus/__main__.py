@@ -12,7 +12,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import backfill, compare, db, epmc, judge, sample
+from . import backfill, chunk, compare, db, epmc, judge, sample
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
 
@@ -89,6 +89,27 @@ def cmd_judge(args: argparse.Namespace) -> int:
     )
     _log(f"corpus relevance histogram: {dist}")
     return 1 if failed and not done else 0
+
+
+def cmd_chunk(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    chunk.run(
+        conn,
+        _log,
+        min_relevance=args.min_relevance,
+        workers=args.workers,
+        limit=args.limit,
+    )
+    sections = dict(
+        conn.execute("SELECT section, count(*) FROM chunks GROUP BY 1 ORDER BY 2 DESC").fetchall()
+    )
+    total, mean, low, high = conn.execute(
+        "SELECT count(*), avg(n_words), min(n_words), max(n_words) FROM chunks"
+    ).fetchone()
+    if total:
+        _log(f"corpus chunks: {total} total, mean {mean:.0f} words, range {low}-{high}")
+        _log(f"  by section: {sections}")
+    return 0
 
 
 def _with_abstracts(conn: sqlite3.Connection, papers: list[Paper], *, require: bool) -> list[Paper]:
@@ -192,6 +213,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--batch", type=int, default=BATCH_SIZE)
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
     s.set_defaults(func=cmd_judge)
+
+    s = sub.add_parser("chunk", help="clean + section-aware chunk stored texts (resumable)")
+    s.add_argument("--min-relevance", type=int, default=5, help="only works scored at least this")
+    s.add_argument("--workers", type=int, default=8)
+    s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.set_defaults(func=cmd_chunk)
 
     s = sub.add_parser("classify", help="score relevance + labels with claude -p")
     s.add_argument("--sample", type=Path, required=True)

@@ -23,6 +23,9 @@ WORK_COLUMNS = {
     "domain": "TEXT",
     "label_source": "TEXT",
     "label_confidence": "REAL",
+    # Set when clean+chunk has processed the work, including when it produced nothing,
+    # so the chunking runner is a no-op on restart.
+    "chunked_at": "TEXT",
 }
 
 ABSTRACTS_SCHEMA = """
@@ -32,6 +35,22 @@ CREATE TABLE IF NOT EXISTS abstracts (
   source TEXT NOT NULL,
   fetched_at TEXT NOT NULL
 );
+"""
+
+# Chunk metadata (relevance, domain, study_type, year) is joined from works rather
+# than copied, so a re-judged work never leaves stale labels behind on its chunks.
+CHUNKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS chunks (
+  chunk_id TEXT PRIMARY KEY,
+  work_id TEXT NOT NULL REFERENCES works(work_id),
+  idx INTEGER NOT NULL,
+  section TEXT NOT NULL,
+  heading TEXT,
+  text TEXT NOT NULL,
+  n_words INTEGER NOT NULL,
+  UNIQUE (work_id, idx)
+);
+CREATE INDEX IF NOT EXISTS chunks_work ON chunks(work_id);
 """
 
 
@@ -50,6 +69,9 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     if not _columns(conn, "abstracts"):
         conn.executescript(ABSTRACTS_SCHEMA)
         applied.append("abstracts")
+    if not _columns(conn, "chunks"):
+        conn.executescript(CHUNKS_SCHEMA)
+        applied.append("chunks")
     conn.commit()
     return applied
 
