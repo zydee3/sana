@@ -85,6 +85,30 @@ def score(
     )
 
 
+def score_hits(
+    hits: Sequence[Sequence[str]],
+    judgments: Judgments,
+    *,
+    backend: str,
+    params: str,
+    n: int,
+    k: int,
+) -> tuple[EvalRow, list[tuple[int, str]]]:
+    """One ranker's hits -> the row that gets logged and written out."""
+    metrics, missing = score(hits, judgments, k=k)
+    row = EvalRow(
+        backend=backend,
+        params=params,
+        n=n,
+        queries=int(metrics["queries"]),
+        p_at_k=metrics["p_at_k"],
+        p_at_3=metrics["p_at_3"],
+        hit_at_3=int(metrics["hit_at_3"]),
+        unjudged=int(metrics["unjudged"]),
+    )
+    return row, missing
+
+
 def evaluate(
     vecs: Floats,
     ids: Sequence[str],
@@ -104,18 +128,10 @@ def evaluate(
     for name in backends:
         for built in index.BUILDERS[name](vecs, out_dir):
             hits = [[ids[i] for i in built.search(q, k)] for q in queries]
-            metrics, missing = score(hits, judgments, k=k)
-            unjudged.update(dict.fromkeys(missing))
-            row = EvalRow(
-                backend=built.backend,
-                params=built.params,
-                n=len(vecs),
-                queries=int(metrics["queries"]),
-                p_at_k=metrics["p_at_k"],
-                p_at_3=metrics["p_at_3"],
-                hit_at_3=int(metrics["hit_at_3"]),
-                unjudged=int(metrics["unjudged"]),
+            row, missing = score_hits(
+                hits, judgments, backend=built.backend, params=built.params, n=len(vecs), k=k
             )
+            unjudged.update(dict.fromkeys(missing))
             rows.append(row)
             log(row.line())
     return rows, list(unjudged)

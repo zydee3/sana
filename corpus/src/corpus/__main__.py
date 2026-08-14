@@ -15,7 +15,20 @@ from pathlib import Path
 
 import numpy as np
 
-from . import backfill, chunk, compare, db, distill, embed, epmc, evaluate, index, judge, sample
+from . import (
+    backfill,
+    chunk,
+    compare,
+    db,
+    distill,
+    embed,
+    epmc,
+    evaluate,
+    index,
+    judge,
+    lexical,
+    sample,
+)
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
 
@@ -208,9 +221,34 @@ def cmd_eval(args: argparse.Namespace) -> int:
     qv = np.vstack([embedder.encode([q], is_query=True) for q in queries])
     judgments = evaluate.load_judgments(args.judgments)
     _log(f"{len(vecs)} vectors ({spec.name}), {len(queries)} queries, {len(judgments)} judgments")
-    rows, unjudged = evaluate.evaluate(
-        vecs, ids, qv, judgments, _log, backends=args.backends, k=args.k
-    )
+    rows: list[evaluate.EvalRow] = []
+    unjudged: dict[tuple[int, str], None] = {}
+    if "dense" in args.rankers:
+        dense_rows, missing = evaluate.evaluate(
+            vecs, ids, qv, judgments, _log, backends=args.backends, k=args.k
+        )
+        rows.extend(dense_rows)
+        unjudged.update(dict.fromkeys(missing))
+    for name in [r for r in args.rankers if r != "dense"]:
+        hits = []
+        for i, q in enumerate(queries):
+            bm25 = lexical.search(conn, q, args.depth)
+            if name == "bm25":
+                hits.append(bm25[: args.k])
+            else:
+                dense = [cid for cid, _ in embed.search(qv[i], vecs, ids, args.depth)]
+                hits.append(lexical.rrf([dense, bm25], args.k))
+        row, missing = evaluate.score_hits(
+            hits,
+            judgments,
+            backend=name,
+            params=f"fts5 porter, depth {args.depth}",
+            n=len(vecs),
+            k=args.k,
+        )
+        rows.append(row)
+        unjudged.update(dict.fromkeys(missing))
+        _log(row.line())
     if args.out:
         args.out.write_text(json.dumps([r.__dict__ for r in rows], indent=1))
         _log(f"wrote {args.out}")
@@ -234,6 +272,13 @@ def cmd_eval(args: argparse.Namespace) -> int:
             )
         args.dump_unjudged.write_text("\n".join(json.dumps(p) for p in pairs))
         _log(f"wrote {len(pairs)} unjudged pairs to {args.dump_unjudged}")
+    return 0
+
+
+def cmd_lexical(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    n = lexical.build(conn, _log, rebuild=args.rebuild)
+    _log(f"chunks_fts covers {n} chunks")
     return 0
 
 
@@ -449,6 +494,14 @@ def main(argv: list[str] | None = None) -> int:
         help="score only the first N queries (negative controls sit at the tail)",
     )
     s.add_argument("--backends", nargs="+", default=["exact"], choices=list(index.BUILDERS))
+    s.add_argument(
+        "--rankers",
+        nargs="+",
+        default=["dense"],
+        choices=["dense", "bm25", "hybrid"],
+        help="dense runs --backends; bm25/hybrid need `corpus lexical`",
+    )
+    s.add_argument("--depth", type=int, default=50, help="per-arm depth fused into hybrid")
     s.add_argument("--k", type=int, default=10)
     s.add_argument("--threads", type=int, default=8)
     s.add_argument("--out", type=Path, default=None)
@@ -456,6 +509,10 @@ def main(argv: list[str] | None = None) -> int:
         "--dump-unjudged", type=Path, default=None, help="jsonl of pairs needing a verdict"
     )
     s.set_defaults(func=cmd_eval)
+
+    s = sub.add_parser("lexical", help="build the FTS5 index over chunk text")
+    s.add_argument("--rebuild", action="store_true", help="drop and repopulate")
+    s.set_defaults(func=cmd_lexical)
 
     s = sub.add_parser("index-bench", help="sqlite-vec vs FAISS on the stored vectors")
     s.add_argument("--model", default="minilm-int8", choices=list(embed.MODELS))
