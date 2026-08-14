@@ -96,6 +96,24 @@ def test_below_threshold_works_are_not_pending() -> None:
     assert chunk.pending(conn, 5, None) == []
 
 
+def test_budget_scales_the_cap_with_the_target() -> None:
+    default, smaller = chunk.budget(), chunk.budget(256)
+    assert (default.target_words, default.max_words) == (chunk.TARGET_WORDS, chunk.MAX_WORDS)
+    assert smaller.target_words < default.target_words
+    # The cap keeps the same headroom ratio, so a smaller target cannot clip the encoder.
+    ratio = default.max_words / default.target_words
+    assert abs(smaller.max_words / smaller.target_words - ratio) < 0.02
+
+
+def test_a_smaller_target_shrinks_the_chunks() -> None:
+    raw = "\n\n".join(f"{_para(60)} number {i}." for i in range(20))
+    big = chunk.chunk_text("W1", raw)
+    small = chunk.chunk_text("W1", raw, chunk.budget(256))
+    assert max(c.n_words for c in small) <= chunk.budget(256).max_words
+    assert max(c.n_words for c in small) < max(c.n_words for c in big)
+    assert sum(c.n_words for c in small) == sum(c.n_words for c in big)
+
+
 def test_packed_run_of_non_prose_lines_is_dropped() -> None:
     # Each line is short enough that clean() exempts it, but together they pack into a
     # chunk that is plainly not prose.

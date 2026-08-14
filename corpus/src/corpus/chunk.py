@@ -40,6 +40,26 @@ TARGET_WORDS = int(TARGET_TOKENS / TOKENS_PER_WORD)
 MAX_WORDS = int(MAX_TOKENS / TOKENS_PER_WORD)
 MIN_WORDS = int(MIN_TOKENS / TOKENS_PER_WORD)
 
+
+@dataclass(frozen=True)
+class Budget:
+    """Word budgets for one token target."""
+
+    target_words: int
+    max_words: int
+    min_words: int
+
+
+def budget(target_tokens: int = TARGET_TOKENS) -> Budget:
+    """Budgets for a chunk-size experiment; the cap keeps TARGET_TOKENS' headroom ratio."""
+    max_tokens = round(target_tokens * MAX_TOKENS / TARGET_TOKENS)
+    return Budget(
+        target_words=int(target_tokens / TOKENS_PER_WORD),
+        max_words=int(max_tokens / TOKENS_PER_WORD),
+        min_words=MIN_WORDS,
+    )
+
+
 COMMIT_WORKS = 200
 POOL_CHUNKSIZE = 16
 
@@ -132,19 +152,26 @@ def chunk_blocks(
     return chunks
 
 
-def chunk_text(work_id: str, raw: str) -> list[Chunk]:
+def chunk_text(work_id: str, raw: str, size: Budget | None = None) -> list[Chunk]:
+    b = size or budget()
     blocks, _ = clean(raw)
-    return chunk_blocks(work_id, blocks)
+    return chunk_blocks(
+        work_id,
+        blocks,
+        target_words=b.target_words,
+        max_words=b.max_words,
+        min_words=b.min_words,
+    )
 
 
-def _chunk_file(job: tuple[str, str]) -> tuple[str, list[Chunk]]:
-    work_id, text_path = job
+def _chunk_file(job: tuple[str, str, Budget]) -> tuple[str, list[Chunk]]:
+    work_id, text_path, size = job
     path = TEXTS_DIR / Path(text_path).name
     try:
         raw = path.read_text(errors="replace")
     except OSError:
         return work_id, []
-    return work_id, chunk_text(work_id, raw)
+    return work_id, chunk_text(work_id, raw, size)
 
 
 PENDING = """
@@ -195,14 +222,20 @@ def run(
     min_relevance: int,
     workers: int = 8,
     limit: int | None = None,
+    target_tokens: int = TARGET_TOKENS,
 ) -> tuple[int, int]:
     """Clean + chunk every pending work at or above min_relevance. Returns (works, chunks)."""
     todo = pending(conn, min_relevance, limit)
-    log(f"chunking {len(todo)} works (relevance >= {min_relevance}) on {workers} workers")
+    size = budget(target_tokens)
+    log(
+        f"chunking {len(todo)} works (relevance >= {min_relevance}) on {workers} workers, "
+        f"target {target_tokens} tokens ({size.target_words} words, cap {size.max_words})"
+    )
     done = written = 0
     batch: list[tuple[str, list[Chunk]]] = []
+    jobs = [(work_id, text_path, size) for work_id, text_path in todo]
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        for result in pool.map(_chunk_file, todo, chunksize=POOL_CHUNKSIZE):
+        for result in pool.map(_chunk_file, jobs, chunksize=POOL_CHUNKSIZE):
             batch.append(result)
             done += 1
             if len(batch) >= COMMIT_WORKS:

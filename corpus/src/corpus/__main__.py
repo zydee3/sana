@@ -102,6 +102,7 @@ def cmd_chunk(args: argparse.Namespace) -> int:
         min_relevance=args.min_relevance,
         workers=args.workers,
         limit=args.limit,
+        target_tokens=args.target_tokens,
     )
     sections = dict(
         conn.execute("SELECT section, count(*) FROM chunks GROUP BY 1 ORDER BY 2 DESC").fetchall()
@@ -320,6 +321,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--min-relevance", type=int, default=5, help="only works scored at least this")
     s.add_argument("--workers", type=int, default=8)
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.add_argument(
+        "--target-tokens",
+        type=int,
+        default=chunk.TARGET_TOKENS,
+        help="chunk size target; use a scratch --db when trying a different one",
+    )
     s.set_defaults(func=cmd_chunk)
 
     s = sub.add_parser("embed-bench", help="throughput + tokenization stats per candidate model")
