@@ -13,6 +13,8 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
+
 from . import backfill, chunk, compare, db, embed, epmc, evaluate, index, judge, sample
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
@@ -198,7 +200,12 @@ def cmd_eval(args: argparse.Namespace) -> int:
     spec = embed.MODELS[args.model]
     vecs, ids = embed.load_vectors(args.model)
     queries = _read_queries(args.queries)[: args.queries_limit]
-    qv = embed.Embedder(spec, threads=args.threads).encode(queries, is_query=True)
+    # One query per encode call, like the serving path: dynamic int8 quantization takes
+    # its activation scales over the whole input tensor, so batching queries together
+    # perturbs each one (~0.99 cosine, ~11% of the top-10 churns) and the eval would
+    # score vectors no request will ever produce.
+    embedder = embed.Embedder(spec, threads=args.threads)
+    qv = np.vstack([embedder.encode([q], is_query=True) for q in queries])
     judgments = evaluate.load_judgments(args.judgments)
     _log(f"{len(vecs)} vectors ({spec.name}), {len(queries)} queries, {len(judgments)} judgments")
     rows, unjudged = evaluate.evaluate(
