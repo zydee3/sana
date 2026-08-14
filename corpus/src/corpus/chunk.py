@@ -6,9 +6,12 @@ and a paragraph too long to fit alone is split on sentence boundaries. No overla
 paragraph boundaries are already the natural seam, and the golden-query eval is what
 should decide whether overlap earns its storage.
 
-Sizes are stated in tokens (mission target ~350) but measured in words through
-TOKENS_PER_WORD, since no tokenizer is installed yet — the embedding iteration must
-re-check this ratio against the model's real tokenizer before trusting MAX_TOKENS.
+Sizes are stated in tokens but measured in words through TOKENS_PER_WORD. The target
+is 256, not the mission's ~350: measured on the golden queries, 256 retrieves better
+(P@10 0.555 vs 0.460, P@3 0.700 vs 0.483) and 350 overran MiniLM's 512-token limit on
+3.5% of chunks against 0.2% here. TOKENS_PER_WORD stays 1.35 even though the real
+ratio through MiniLM's tokenizer is 1.474, because 1.35 is what produced the packing
+that was evaluated — at this target it lands a 260-token median, p90 343.
 
 Metadata is inherited by join, not by copy: relevance/domain/study_type/year live on
 works and would go stale if duplicated here. The runner is resumable per work
@@ -31,9 +34,9 @@ from .clean import Block, clean, is_prose
 
 TEXTS_DIR = Path(os.environ.get("SANA_TEXTS_DIR", "/sana-data/corpus/texts"))
 
-TOKENS_PER_WORD = 1.35  # medical prose through a WordPiece vocab, to be verified
-TARGET_TOKENS = 350
-MAX_TOKENS = 460  # leaves headroom under a 512-token encoder
+TOKENS_PER_WORD = 1.35  # packing constant, not the real ratio (1.474) — see module docstring
+TARGET_TOKENS = 256
+MAX_TOKENS = 336  # leaves headroom under a 512-token encoder
 MIN_TOKENS = 34  # below this a chunk is a caption or a stray line
 
 TARGET_WORDS = int(TARGET_TOKENS / TOKENS_PER_WORD)
