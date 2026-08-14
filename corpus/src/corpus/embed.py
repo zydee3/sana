@@ -101,7 +101,7 @@ MODELS: dict[str, ModelSpec] = {
 }
 
 
-def _download(url: str, dest: Path, log: Log) -> None:
+def download(url: str, dest: Path, log: Log) -> None:
     if dest.exists():
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -116,9 +116,9 @@ def ensure_model(spec: ModelSpec, log: Log = print) -> tuple[Path, Path]:
     root = MODELS_DIR / spec.name
     onnx = root / "model.onnx"
     tok = root / "tokenizer.json"
-    _download(f"https://huggingface.co/{spec.repo}/resolve/main/{spec.onnx_path}", onnx, log)
+    download(f"https://huggingface.co/{spec.repo}/resolve/main/{spec.onnx_path}", onnx, log)
     tok_repo = spec.tokenizer_repo or spec.repo
-    _download(f"https://huggingface.co/{tok_repo}/resolve/main/tokenizer.json", tok, log)
+    download(f"https://huggingface.co/{tok_repo}/resolve/main/tokenizer.json", tok, log)
     return onnx, tok
 
 

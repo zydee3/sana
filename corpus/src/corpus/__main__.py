@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from . import (
     index,
     judge,
     lexical,
+    rerank,
     sample,
 )
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
@@ -208,6 +210,15 @@ def cmd_retrieve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _chunk_texts(conn: sqlite3.Connection, chunk_ids: Sequence[str]) -> list[str]:
+    """Chunk text for each id, in the given order."""
+    holes = ",".join("?" * len(chunk_ids))
+    rows = dict(
+        conn.execute(f"SELECT chunk_id, text FROM chunks WHERE chunk_id IN ({holes})", chunk_ids)
+    )
+    return [str(rows[cid]) for cid in chunk_ids]
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     conn = db.connect(args.db, read_only=True)
     spec = embed.MODELS[args.model]
@@ -229,20 +240,38 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
         rows.extend(dense_rows)
         unjudged.update(dict.fromkeys(missing))
+    encoder: rerank.CrossEncoder | None = None
+
+    def ranked(name: str, i: int, q: str, encoder: rerank.CrossEncoder | None) -> list[str]:
+        """One non-dense arm's ranking for one query."""
+        if name == "bm25":
+            return lexical.search(conn, q, args.depth)[: args.k]
+        dense = [cid for cid, _ in embed.search(qv[i], vecs, ids, args.depth)]
+        if name == "hybrid":
+            return lexical.rrf([dense, lexical.search(conn, q, args.depth)], args.k)
+        if name == "rerank":
+            cands = dense
+        else:
+            cands = rerank.union(dense, lexical.search(conn, q, args.depth))
+        assert encoder is not None
+        return rerank.top_k(cands, encoder.score(q, _chunk_texts(conn, cands)), args.k)
+
     for name in [r for r in args.rankers if r != "dense"]:
-        hits = []
-        for i, q in enumerate(queries):
-            bm25 = lexical.search(conn, q, args.depth)
-            if name == "bm25":
-                hits.append(bm25[: args.k])
-            else:
-                dense = [cid for cid, _ in embed.search(qv[i], vecs, ids, args.depth)]
-                hits.append(lexical.rrf([dense, bm25], args.k))
+        if name.startswith("rerank") and encoder is None:
+            encoder = rerank.CrossEncoder(rerank.RERANKERS[args.reranker], threads=args.threads)
+        start = time.monotonic()
+        hits = [ranked(name, i, q, encoder) for i, q in enumerate(queries)]
+        per_query = (time.monotonic() - start) / max(1, len(queries))
+        params = (
+            f"{args.reranker}, depth {args.depth}, {per_query * 1000:.0f}ms/q"
+            if name.startswith("rerank")
+            else f"fts5 porter, depth {args.depth}"
+        )
         row, missing = evaluate.score_hits(
             hits,
             judgments,
             backend=name,
-            params=f"fts5 porter, depth {args.depth}",
+            params=params,
             n=len(vecs),
             k=args.k,
         )
@@ -498,10 +527,16 @@ def main(argv: list[str] | None = None) -> int:
         "--rankers",
         nargs="+",
         default=["dense"],
-        choices=["dense", "bm25", "hybrid"],
-        help="dense runs --backends; bm25/hybrid need `corpus lexical`",
+        choices=["dense", "bm25", "hybrid", "rerank", "rerank-union"],
+        help="dense runs --backends; bm25/hybrid/rerank-union need `corpus lexical`",
     )
-    s.add_argument("--depth", type=int, default=50, help="per-arm depth fused into hybrid")
+    s.add_argument(
+        "--reranker",
+        default="ms-marco-minilm",
+        choices=list(rerank.RERANKERS),
+        help="cross encoder for the rerank arms",
+    )
+    s.add_argument("--depth", type=int, default=50, help="candidates per arm before fuse/rerank")
     s.add_argument("--k", type=int, default=10)
     s.add_argument("--threads", type=int, default=8)
     s.add_argument("--out", type=Path, default=None)
