@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import backfill, chunk, compare, db, embed, epmc, index, judge, sample
+from . import backfill, chunk, compare, db, embed, epmc, evaluate, index, judge, sample
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
 
@@ -193,6 +193,43 @@ def cmd_retrieve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db, read_only=True)
+    spec = embed.MODELS[args.model]
+    vecs, ids = embed.load_vectors(args.model)
+    queries = _read_queries(args.queries)[: args.queries_limit]
+    qv = embed.Embedder(spec, threads=args.threads).encode(queries, is_query=True)
+    judgments = evaluate.load_judgments(args.judgments)
+    _log(f"{len(vecs)} vectors ({spec.name}), {len(queries)} queries, {len(judgments)} judgments")
+    rows, unjudged = evaluate.evaluate(
+        vecs, ids, qv, judgments, _log, backends=args.backends, k=args.k
+    )
+    if args.out:
+        args.out.write_text(json.dumps([r.__dict__ for r in rows], indent=1))
+        _log(f"wrote {args.out}")
+    if args.dump_unjudged:
+        pairs = []
+        for query_idx, chunk_id in unjudged:
+            r = conn.execute(
+                "SELECT c.text, c.section, w.title FROM chunks c JOIN works w USING (work_id) "
+                "WHERE c.chunk_id = ?",
+                (chunk_id,),
+            ).fetchone()
+            pairs.append(
+                {
+                    "query_idx": query_idx,
+                    "query": queries[query_idx - 1],
+                    "chunk_id": chunk_id,
+                    "section": r[1] if r else None,
+                    "title": r[2] if r else None,
+                    "text": r[0] if r else None,
+                }
+            )
+        args.dump_unjudged.write_text("\n".join(json.dumps(p) for p in pairs))
+        _log(f"wrote {len(pairs)} unjudged pairs to {args.dump_unjudged}")
+    return 0
+
+
 def cmd_index_bench(args: argparse.Namespace) -> int:
     spec = embed.MODELS[args.model]
     vecs, _ids = embed.load_vectors(args.model)
@@ -352,6 +389,25 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--full", action="store_true", help="dump whole chunk text, not a preview")
     s.add_argument("--out", type=Path, default=None)
     s.set_defaults(func=cmd_retrieve)
+
+    s = sub.add_parser("eval", help="P@k on the golden set, per index backend")
+    s.add_argument("--model", default="minilm-int8", choices=list(embed.MODELS))
+    s.add_argument("--queries", type=Path, required=True, help="one query per line")
+    s.add_argument("--judgments", type=Path, required=True, help="query_idx/chunk_id/relevant tsv")
+    s.add_argument(
+        "--queries-limit",
+        type=int,
+        default=None,
+        help="score only the first N queries (negative controls sit at the tail)",
+    )
+    s.add_argument("--backends", nargs="+", default=["exact"], choices=list(index.BUILDERS))
+    s.add_argument("--k", type=int, default=10)
+    s.add_argument("--threads", type=int, default=8)
+    s.add_argument("--out", type=Path, default=None)
+    s.add_argument(
+        "--dump-unjudged", type=Path, default=None, help="jsonl of pairs needing a verdict"
+    )
+    s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("index-bench", help="sqlite-vec vs FAISS on the stored vectors")
     s.add_argument("--model", default="minilm-int8", choices=list(embed.MODELS))
