@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import backfill, chunk, compare, db, embed, epmc, evaluate, index, judge, sample
+from . import backfill, chunk, compare, db, distill, embed, epmc, evaluate, index, judge, sample
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
 
@@ -316,6 +316,36 @@ def _read_verdicts(path: Path) -> list[Verdict]:
         return [Verdict(**json.loads(line)) for line in f if line.strip()]
 
 
+def cmd_distill(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db, read_only=True)
+    spec = embed.MODELS[args.model]
+    works = distill.load_judged(conn, args.limit)
+    _log(f"{len(works)} judged works with abstracts")
+    x = distill.embed_works(spec, works, _log, workers=args.workers, threads=args.threads)
+    results = distill.pilot(works, x, _log, seed=args.seed)
+    for r in results:
+        _log(
+            f"{r.task}: n_train={r.n_train} n_test={r.n_test} acc={r.accuracy:.3f} "
+            f"(majority {r.majority_baseline:.3f}) macro-f1={r.macro_f1:.3f}"
+        )
+        for name, m in r.per_class.items():
+            _log(
+                f"  {name}: p={m['precision']:.3f} r={m['recall']:.3f} "
+                f"f1={m['f1']:.3f} n={int(m['support'])}"
+            )
+        for row in r.thresholds:
+            _log(
+                f"  t={row['threshold']:.1f}: kept={row['kept_fraction']:.3f} "
+                f"precision={row['precision']:.3f} recall={row['recall']:.3f}"
+            )
+        for name, m in r.by_stratum.items():
+            _log(f"  [{name}] n={int(m['n'])} acc={m['accuracy']:.3f}")
+    if args.out:
+        args.out.write_text(json.dumps([r.__dict__ for r in results], indent=1))
+        _log(f"wrote {args.out}")
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     a, b = _read_verdicts(args.a), _read_verdicts(args.b)
     ag = compare.agreement(a, b, args.threshold)
@@ -442,6 +472,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--ids", type=Path, default=None, help="file of work_ids to restrict to")
     s.add_argument("--out", type=Path, required=True)
     s.set_defaults(func=cmd_classify)
+
+    s = sub.add_parser("distill", help="held-out agreement of a local classifier vs sonnet")
+    s.add_argument("--model", default="minilm-int8", choices=list(embed.MODELS))
+    s.add_argument("--workers", type=int, default=20)
+    s.add_argument("--threads", type=int, default=1)
+    s.add_argument("--limit", type=int, default=None)
+    s.add_argument("--seed", type=int, default=distill.SEED)
+    s.add_argument("--out", type=Path, default=None)
+    s.set_defaults(func=cmd_distill)
 
     s = sub.add_parser("compare", help="agreement between two classify runs")
     s.add_argument("--a", type=Path, required=True)

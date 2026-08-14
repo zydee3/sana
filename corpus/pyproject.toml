@@ -9,6 +9,7 @@ dependencies = [
     "faiss-cpu>=1.15.0",
     "numpy",
     "onnxruntime",
+    "scikit-learn",
     "sqlite-vec>=0.1.9",
     "tokenizers",
 ]
@@ -35,7 +36,7 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["onnxruntime.*", "faiss.*", "sqlite_vec.*"]  # no py.typed marker upstream
+module = ["onnxruntime.*", "faiss.*", "sqlite_vec.*", "sklearn.*"]  # no py.typed marker upstream
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
