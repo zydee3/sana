@@ -340,8 +340,19 @@ def cmd_distill(args: argparse.Namespace) -> int:
             )
         for name, m in r.by_stratum.items():
             _log(f"  [{name}] n={int(m['n'])} acc={m['accuracy']:.3f}")
+    curve = []
+    if args.curve:
+        labels = np.array([int(w.relevance >= 5) for w in works], dtype=np.int64)
+        curve = distill.learning_curve(x, labels, args.curve, seed=args.seed)
+        _log("learning curve, relevance>=5 (same held-out split):")
+        for row in curve:
+            _log(
+                f"  n_train={int(row['n_train'])}: acc={row['accuracy_mean']:.3f} "
+                f"(spread {row['accuracy_spread']:.3f}) auc={row['auc_mean']:.3f}"
+            )
     if args.out:
-        args.out.write_text(json.dumps([r.__dict__ for r in results], indent=1))
+        payload = {"tasks": [r.__dict__ for r in results], "learning_curve": curve}
+        args.out.write_text(json.dumps(payload, indent=1))
         _log(f"wrote {args.out}")
     return 0
 
@@ -479,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--threads", type=int, default=1)
     s.add_argument("--limit", type=int, default=None)
     s.add_argument("--seed", type=int, default=distill.SEED)
+    s.add_argument("--curve", type=int, nargs="*", help="training sizes for a learning curve")
     s.add_argument("--out", type=Path, default=None)
     s.set_defaults(func=cmd_distill)
 

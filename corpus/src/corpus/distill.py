@@ -223,6 +223,50 @@ def fit_task(
     return result
 
 
+def learning_curve(
+    x: Floats,
+    labels: Ints,
+    sizes: Sequence[int],
+    *,
+    seed: int = SEED,
+    repeats: int = 3,
+) -> list[dict[str, float]]:
+    """Held-out accuracy vs training-set size — the "when can judging stop" curve.
+
+    The test split is the one `fit_task` uses, so these numbers sit on the same scale as
+    the headline; only the training subset shrinks. Repeats draw different subsets at the
+    same size, so the spread separates a real plateau from one lucky draw.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    train, test = stratified_split(labels, seed=seed)
+    truth = labels[test]
+    rows = []
+    for n in sizes:
+        n = min(n, len(train))
+        scores, aucs = [], []
+        for r in range(repeats):
+            rng = np.random.default_rng(seed + r)
+            subset = train[rng.choice(len(train), size=n, replace=False)]
+            if len(np.unique(labels[subset])) < 2:
+                continue
+            model = LogisticRegression(max_iter=2000, random_state=seed)
+            model.fit(x[subset], labels[subset])
+            prob = np.asarray(model.predict_proba(x[test]), dtype=np.float32)
+            pred = np.asarray(model.classes_[prob.argmax(axis=1)], dtype=np.int64)
+            scores.append(float(np.mean(pred == truth)))
+            aucs.append(roc_auc(truth, prob[:, list(model.classes_).index(1)]))
+        rows.append(
+            {
+                "n_train": float(n),
+                "accuracy_mean": float(np.mean(scores)),
+                "accuracy_spread": float(np.max(scores) - np.min(scores)),
+                "auc_mean": float(np.mean(aucs)),
+            }
+        )
+    return rows
+
+
 def pilot(
     works: Sequence[JudgedWork], x: Floats, log: Log, *, seed: int = SEED
 ) -> list[TaskResult]:
