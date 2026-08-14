@@ -94,8 +94,10 @@ def pending_ids(
     *,
     via: Sequence[str] | None = None,
     status: str | None = None,
+    only: Sequence[str] | None = None,
 ) -> list[str]:
-    """Pending ids, shuffled. `via`/`status` restrict a run to one discovery stratum."""
+    """Pending ids, shuffled. `via`/`status` restrict a run to one discovery stratum;
+    `only` restricts it to a fixed id list (a drawn sample), still skipping judged rows."""
     where, params = _PENDING, []
     if via:
         where += f" AND discovered_via IN ({','.join('?' * len(via))})"
@@ -104,7 +106,8 @@ def pending_ids(
         where += " AND status = ?"
         params.append(status)
     rows = conn.execute(f"SELECT work_id {where} ORDER BY work_id", params).fetchall()
-    ids = [str(r[0]) for r in rows]
+    wanted = set(only) if only is not None else None
+    ids = [str(r[0]) for r in rows if wanted is None or r[0] in wanted]
     random.Random(seed).shuffle(ids)
     return ids
 
@@ -172,9 +175,10 @@ def run(
     brake: int = FAILURE_BRAKE,
     via: Sequence[str] | None = None,
     status: str | None = None,
+    only: Sequence[str] | None = None,
 ) -> tuple[int, int]:
     """Judge pending works until none are left (or `limit` are done). Returns (done, failed)."""
-    ids = pending_ids(conn, seed, via=via, status=status)[:limit]
+    ids = pending_ids(conn, seed, via=via, status=status, only=only)[:limit]
     batches = [ids[i : i + batch_size] for i in range(0, len(ids), batch_size)]
     log(f"judging {len(ids)} pending works in {len(batches)} batches, {workers} workers, {model}")
     done = failed = streak = 0

@@ -115,6 +115,16 @@ def test_pending_can_be_restricted_to_one_stratum() -> None:
     ]
 
 
+def test_pending_can_be_restricted_to_a_drawn_sample() -> None:
+    conn = _conn()
+    for i in range(4):
+        _work(conn, f"W{i}")
+    conn.execute("UPDATE works SET relevance = 5 WHERE work_id = 'W1'")
+    conn.commit()
+    # W1 is in the sample but already judged, W9 is not a row at all: neither comes back.
+    assert sorted(judge.pending_ids(conn, only=["W0", "W1", "W9"])) == ["W0"]
+
+
 def test_store_keeps_a_publisher_study_type_and_says_so() -> None:
     conn = _conn()
     _work(conn, "W1", study_type="rct")
