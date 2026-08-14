@@ -26,6 +26,11 @@ WORK_COLUMNS = {
     # Set when clean+chunk has processed the work, including when it produced nothing,
     # so the chunking runner is a no-op on restart.
     "chunked_at": "TEXT",
+    # The distilled head's output for works no model provider ever judged: P(relevance>=5)
+    # and a predicted domain. Kept apart from relevance/domain because it is a ranker at
+    # ~0.77 precision, not a judgment, and a threshold on it must stay re-choosable.
+    "gate_p5": "REAL",
+    "gate_domain": "TEXT",
 }
 
 ABSTRACTS_SCHEMA = """

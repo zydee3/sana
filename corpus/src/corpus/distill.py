@@ -7,8 +7,9 @@ uses, fit a cheap head on the sonnet labels, and apply it to the unjudged remain
 This module measures whether that works — held-out agreement with sonnet, per stratum,
 plus the precision/recall a keep-threshold would actually run at.
 
-Nothing here calls a model provider, and nothing here writes labels to the DB: it is a
-measurement that answers "is (b) viable", not the production classifier.
+Nothing here calls a model provider. `pilot`/`fit_task`/`learning_curve` measure whether
+(b) is viable; `fit_heads`/`apply_heads` are the production side that acts on the answer,
+writing gate_p5 + gate_domain for works no provider judged.
 
 The head is multinomial logistic regression on L2-normalised embeddings. It is the
 right first probe rather than a compromise — with a frozen encoder the features are
@@ -23,6 +24,7 @@ import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -38,6 +40,10 @@ SEED = 0
 # 512 tokens anyway, so the cap here only keeps tokenisation off pathological rows.
 ABSTRACT_CHARS = 4000
 THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
+KEEP_CUT = 5
+# Works scored per apply pass. Each slab is embedded, written and committed as a unit, so a
+# killed run loses at most one slab and a restart picks up where it stopped.
+SLAB = 20_000
 
 
 @dataclass(frozen=True)
@@ -265,6 +271,82 @@ def learning_curve(
             }
         )
     return rows
+
+
+@dataclass(frozen=True)
+class Heads:
+    """The production heads: same hyperparameters as `fit_task`, fit on every label.
+
+    fit_task holds 20% out so its accuracy means something; these see all of it, because
+    the measurement has already been made and the extra rows only help. Anything that
+    changes here invalidates the numbers `pilot` reported.
+    """
+
+    relevance: Any
+    domain: Any
+    domains: list[str]
+
+
+def fit_heads(works: Sequence[JudgedWork], x: Floats, *, seed: int = SEED) -> Heads:
+    from sklearn.linear_model import LogisticRegression
+
+    domains = sorted({w.domain for w in works})
+    keep = np.array([int(w.relevance >= KEEP_CUT) for w in works], dtype=np.int64)
+    tags = np.array([domains.index(w.domain) for w in works], dtype=np.int64)
+    return Heads(
+        relevance=LogisticRegression(max_iter=2000, C=1.0, random_state=seed).fit(x, keep),
+        domain=LogisticRegression(max_iter=2000, C=1.0, random_state=seed).fit(x, tags),
+        domains=domains,
+    )
+
+
+PENDING_GATE = """
+SELECT w.work_id, w.title, a.abstract
+FROM works w JOIN abstracts a USING (work_id)
+WHERE w.status LIKE 'kept%' AND w.relevance IS NULL AND w.gate_p5 IS NULL
+  AND a.abstract IS NOT NULL AND LENGTH(a.abstract) > 50
+ORDER BY w.work_id LIMIT ?
+"""
+
+
+def pending(conn: sqlite3.Connection, slab: int) -> list[tuple[str, str]]:
+    """Kept works with an abstract that neither a provider nor the gate has scored."""
+    return [
+        (str(r[0]), f"{r[1]}\n\n{str(r[2])[:ABSTRACT_CHARS]}")
+        for r in conn.execute(PENDING_GATE, (slab,))
+    ]
+
+
+def apply_heads(
+    conn: sqlite3.Connection,
+    heads: Heads,
+    encode: Callable[[Sequence[str]], Floats],
+    log: Log,
+    *,
+    slab: int = SLAB,
+    limit: int | None = None,
+) -> int:
+    """Write gate_p5 + gate_domain for every unjudged kept work. Returns rows scored."""
+    positive = list(heads.relevance.classes_).index(1)
+    done = 0
+    while limit is None or done < limit:
+        rows = pending(conn, slab if limit is None else min(slab, limit - done))
+        if not rows:
+            break
+        vecs = encode([text for _, text in rows])
+        p5 = np.asarray(heads.relevance.predict_proba(vecs), dtype=np.float32)[:, positive]
+        tags = np.asarray(heads.domain.predict(vecs), dtype=np.int64)
+        conn.executemany(
+            "UPDATE works SET gate_p5 = ?, gate_domain = ? WHERE work_id = ?",
+            [
+                (float(p), heads.domains[int(t)], work_id)
+                for (work_id, _), p, t in zip(rows, p5, tags, strict=True)
+            ],
+        )
+        conn.commit()
+        done += len(rows)
+        log(f"gated {done} works (this slab: mean p5 {float(p5.mean()):.3f})")
+    return done
 
 
 def pilot(

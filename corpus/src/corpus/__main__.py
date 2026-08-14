@@ -431,6 +431,46 @@ def cmd_distill(args: argparse.Namespace) -> int:
     return 0
 
 
+GATE_TOTALS = """
+SELECT count(*), avg(gate_p5),
+       sum(gate_p5 >= 0.3), sum(gate_p5 >= 0.5), sum(gate_p5 >= 0.7)
+FROM works WHERE gate_p5 IS NOT NULL
+"""
+
+GATE_BY = """
+SELECT {col}, count(*), avg(gate_p5), avg(gate_p5 >= 0.3)
+FROM works WHERE gate_p5 IS NOT NULL GROUP BY 1 ORDER BY 2 DESC
+"""
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    spec = embed.MODELS[args.model]
+    judged = distill.load_judged(conn)
+    _log(f"fitting the gate on {len(judged)} judged works ({spec.name})")
+    x = distill.embed_works(spec, judged, _log, workers=args.workers, threads=args.threads)
+    heads = distill.fit_heads(judged, x, seed=args.seed)
+
+    def encode(texts: Sequence[str]) -> embed.Floats:
+        return embed.encode_parallel(spec, texts, workers=args.workers, threads=args.threads)
+
+    start = time.monotonic()
+    n = distill.apply_heads(conn, heads, encode, _log, slab=args.slab, limit=args.limit)
+    elapsed = time.monotonic() - start
+    _log(f"scored {n} works in {elapsed:.0f}s ({n / elapsed:.0f}/s)" if n else "nothing pending")
+
+    total, mean, t3, t5, t7 = conn.execute(GATE_TOTALS).fetchone()
+    if not total:
+        return 0
+    _log(f"gated corpus: {total} works, mean p5 {mean:.3f}")
+    for t, kept in ((0.3, t3), (0.5, t5), (0.7, t7)):
+        _log(f"  p5>={t}: {kept} works ({kept / total:.1%})")
+    for col in ("discovered_via", "status", "gate_domain"):
+        for name, n_rows, avg_p5, keep in conn.execute(GATE_BY.format(col=col)):
+            _log(f"  [{col}={name}] n={n_rows} mean p5 {avg_p5:.3f} p5>=0.3 {keep:.1%}")
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     a, b = _read_verdicts(args.a), _read_verdicts(args.b)
     ag = compare.agreement(a, b, args.threshold)
@@ -585,6 +625,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--curve", type=int, nargs="*", help="training sizes for a learning curve")
     s.add_argument("--out", type=Path, default=None)
     s.set_defaults(func=cmd_distill)
+
+    s = sub.add_parser("gate", help="score unjudged kept works with the distilled head (resumable)")
+    s.add_argument("--model", default="minilm-int8", choices=list(embed.MODELS))
+    s.add_argument("--workers", type=int, default=20)
+    s.add_argument("--threads", type=int, default=1)
+    s.add_argument("--slab", type=int, default=distill.SLAB, help="works per write+commit")
+    s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.add_argument("--seed", type=int, default=distill.SEED)
+    s.set_defaults(func=cmd_gate)
 
     s = sub.add_parser("compare", help="agreement between two classify runs")
     s.add_argument("--a", type=Path, required=True)
