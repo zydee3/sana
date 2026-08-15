@@ -38,9 +38,14 @@ def to_match(query: str) -> str:
 
 
 def indexed(conn: sqlite3.Connection) -> int:
-    """Rows in the FTS index, or 0 when it does not exist yet."""
+    """Rows in the FTS index, or 0 when it does not exist yet.
+
+    Counted over the shadow docsize table, not `chunks_fts`: an external-content
+    table answers `count(*)` from `chunks`, so it reports every chunk as indexed
+    even when the inverted index was built before those rows existed.
+    """
     try:
-        return int(conn.execute("SELECT count(*) FROM chunks_fts").fetchone()[0])
+        return int(conn.execute("SELECT count(*) FROM chunks_fts_docsize").fetchone()[0])
     except sqlite3.OperationalError:
         return 0
 

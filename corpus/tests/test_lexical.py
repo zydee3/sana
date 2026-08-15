@@ -44,6 +44,22 @@ def test_search_ranks_by_bm25_and_returns_chunk_ids() -> None:
     assert lexical.search(conn, "?!", 5) == []
 
 
+def test_build_reindexes_chunks_added_after_the_last_build() -> None:
+    conn = _db()
+    lexical.build(conn, lambda _m: None)
+    conn.execute(
+        "INSERT INTO chunks VALUES (?,?,?,?)",
+        ("W4#0", "W4", 0, "mindfulness based stress reduction lowers perceived stress"),
+    )
+    conn.commit()
+    # count(*) on the external-content table reads `chunks`, so staleness is only
+    # visible in the shadow docsize table.
+    assert conn.execute("SELECT count(*) FROM chunks_fts").fetchone()[0] == 4
+    assert lexical.indexed(conn) == 3
+    assert lexical.build(conn, lambda _m: None) == 4
+    assert lexical.search(conn, "mindfulness stress reduction", 5) == ["W4#0"]
+
+
 def test_rebuild_repopulates_after_the_chunk_set_changes() -> None:
     conn = _db()
     lexical.build(conn, lambda _m: None)
