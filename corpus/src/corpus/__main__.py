@@ -25,6 +25,7 @@ from . import (
     embed,
     epmc,
     evaluate,
+    extract,
     index,
     judge,
     lexical,
@@ -132,6 +133,45 @@ def cmd_chunk(args: argparse.Namespace) -> int:
         _log(f"corpus chunks: {total} total, mean {mean:.0f} words, range {low}-{high}")
         _log(f"  by section: {sections}")
     return 0
+
+
+def cmd_extract(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    drops: Counter[str] = Counter()
+    per_work: Counter[int] = Counter()
+    out = args.report.open("w") if args.report else None
+
+    def report(r: extract.WorkResult, usage: extract.Usage) -> None:
+        per_work[len(r.findings)] += 1
+        drops.update(d["reason"] for d in r.drops)
+        if out is not None:
+            out.write(extract.result_json(r, usage) + "\n")
+            out.flush()
+
+    done, failed, usage = extract.run(
+        conn,
+        _log,
+        model=args.model,
+        workers=args.workers,
+        batch_size=args.batch,
+        limit=args.limit,
+        min_relevance=args.min_relevance,
+        only=args.ids.read_text().split() if args.ids else None,
+        dry_run=args.dry_run,
+        report=report,
+    )
+    if out is not None:
+        out.close()
+        _log(f"report -> {args.report}")
+    if done:
+        calls = max(1, -(-done // args.batch))
+        _log(f"findings per work: {dict(sorted(per_work.items()))}")
+        _log(f"drops by reason: {dict(drops.most_common())}")
+        _log(
+            f"cost: {usage.input_tokens / calls:.0f} in + {usage.output_tokens / calls:.0f} out "
+            f"tokens/call, {usage.cost_usd / done:.4f} usd/work, {usage.seconds / calls:.0f} s/call"
+        )
+    return 1 if failed and not done else 0
 
 
 def cmd_embed_bench(args: argparse.Namespace) -> int:
@@ -529,6 +569,17 @@ def main(argv: list[str] | None = None) -> int:
         help="chunk size target; use a scratch --db when trying a different one",
     )
     s.set_defaults(func=cmd_chunk)
+
+    s = sub.add_parser("extract", help="findings (claim + caveats + anchor) per work, resumable")
+    s.add_argument("--model", default="sonnet")
+    s.add_argument("--workers", type=int, default=2)
+    s.add_argument("--batch", type=int, default=extract.BATCH_SIZE, help="works per claude call")
+    s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.add_argument("--min-relevance", type=int, default=7)
+    s.add_argument("--ids", type=Path, default=None, help="only these work ids (one per line)")
+    s.add_argument("--dry-run", action="store_true", help="extract and validate, store nothing")
+    s.add_argument("--report", type=Path, default=None, help="jsonl of findings, drops and usage")
+    s.set_defaults(func=cmd_extract)
 
     s = sub.add_parser("embed-bench", help="throughput + tokenization stats per candidate model")
     s.add_argument("--models", nargs="+", default=list(embed.MODELS), choices=list(embed.MODELS))

@@ -31,6 +31,9 @@ WORK_COLUMNS = {
     # ~0.77 precision, not a judgment, and a threshold on it must stay re-choosable.
     "gate_p5": "REAL",
     "gate_domain": "TEXT",
+    # Set when findings extraction has read the work, including when it produced no
+    # findings, so the extraction runner is a no-op on restart.
+    "extracted_at": "TEXT",
 }
 
 ABSTRACTS_SCHEMA = """
@@ -58,6 +61,24 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS chunks_work ON chunks(work_id);
 """
 
+# The citable unit of the client bundle: a claim, its mandatory caveats, and an anchor
+# into the chunk that supports it. finding_id is a content hash of (work_id, claim) —
+# never derived from chunk_id, because the client persists it across re-chunking runs.
+FINDINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS findings (
+  finding_id TEXT PRIMARY KEY,
+  work_id TEXT NOT NULL REFERENCES works(work_id),
+  claim TEXT NOT NULL,
+  caveats TEXT NOT NULL,
+  anchor_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id),
+  char_start INTEGER NOT NULL,
+  char_end INTEGER NOT NULL,
+  quote TEXT NOT NULL,
+  extracted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS findings_work ON findings(work_id);
+"""
+
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -77,6 +98,9 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     if not _columns(conn, "chunks"):
         conn.executescript(CHUNKS_SCHEMA)
         applied.append("chunks")
+    if not _columns(conn, "findings"):
+        conn.executescript(FINDINGS_SCHEMA)
+        applied.append("findings")
     conn.commit()
     return applied
 
