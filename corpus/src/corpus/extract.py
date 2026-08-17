@@ -95,14 +95,19 @@ Every finding has exactly these fields:
 - claim: ONE plain sentence, readable by a non-expert, stating what this paper found.
   Give the direction and, where the text states it, the size ("cut insomnia severity by
   about 5 points on the ISI"). No citation markers, no jargon a lay reader would not
-  know, no hedging preamble.
+  know, no hedging preamble. Say only what your quoted span shows: keep the hedges the
+  span keeps, and do not state a number that sits somewhere else in the paper.
 - caveats: the population, duration and design limits a careful reader must attach to
   the claim, in 1-2 clauses ("40 adults with chronic insomnia, 8 weeks, no active
   control"). NEVER empty and never "none" — if you cannot state a caveat, drop the
   finding instead.
 - chunk_id: the chunk whose text supports the claim, copied from its tag.
 - quote: 1-3 consecutive sentences copied EXACTLY, character for character, from that
-  one chunk. No paraphrase, no ellipses, no text joined across chunks.
+  one chunk. No paraphrase, no ellipses, no text joined across chunks. The quote must
+  carry the claim by itself — the same direction and every number the claim states
+  (scale denominators such as "out of 5" aside). A reader who sees only this quote must
+  be able to check the claim. If no single span carries the whole claim, narrow the
+  claim until one does.
 
 Prefer results and conclusions over introduction and methods. Skip anything the paper
 attributes to other studies — findings are this paper's own. If a paper reports fewer
