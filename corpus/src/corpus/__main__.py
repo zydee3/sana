@@ -33,6 +33,7 @@ from . import (
     quality,
     rerank,
     sample,
+    venue,
 )
 from .classify import BATCH_SIZE, ClassifyError, classify_batch
 from .models import Paper, Verdict
@@ -527,6 +528,16 @@ def cmd_quality(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_venue(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    venue.run(conn, _log, args.limit)
+    rows = conn.execute(
+        "SELECT venue_source, count(*) FROM works WHERE venue_source IS NOT NULL GROUP BY 1"
+    ).fetchall()
+    _log(f"venues by source: {dict(rows)}")
+    return 0
+
+
 def cmd_bundle(args: argparse.Namespace) -> int:
     conn = db.connect(args.db, read_only=True)
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%MZ")
@@ -729,6 +740,10 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("quality", help="recompose the bundle's quality scalar for every work")
     s.set_defaults(func=cmd_quality)
+
+    s = sub.add_parser("venue", help="rehydrate journal names for the shippable pool")
+    s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.set_defaults(func=cmd_venue)
 
     s = sub.add_parser("bundle", help="publish the client bundle (manifest + works/findings)")
     s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)

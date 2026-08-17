@@ -39,6 +39,10 @@ WORK_COLUMNS = {
     # Derived, not authoritative: `corpus quality` rewrites both from scratch.
     "quality": "REAL",
     "quality_source": "TEXT",
+    # The journal the client's card renders, rehydrated by venue.py. venue_source is
+    # 'openalex' | 'epmc' | 'missing' — 'missing' is a closed-out row, not a retry.
+    "venue": "TEXT",
+    "venue_source": "TEXT",
 }
 
 ABSTRACTS_SCHEMA = """

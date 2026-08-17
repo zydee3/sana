@@ -102,7 +102,7 @@ def test_only_citable_and_retrievable_works_ship() -> None:
     row = json.loads(works_b.splitlines()[0])
     assert row["work_id"] == "W1"
     assert row["authors"] == ["Murray JK", "Knudson S."]
-    assert row["venue"] is None
+    assert row["venue"] is None  # unset in the fixture; the key ships either way
     anchor = json.loads(findings_b.splitlines()[0])["anchor"]
     assert anchor == {
         "chunk_id": "W1#0",
@@ -111,6 +111,14 @@ def test_only_citable_and_retrievable_works_ship() -> None:
         "char_end": 4,
         "quote": "body",
     }
+
+
+def test_a_rehydrated_venue_ships_on_the_work_record() -> None:
+    conn = _conn()
+    _work(conn, "W1", venue="BMC Medicine", venue_source="openalex")
+    _finding(conn, "f_a", "W1")
+    works_b, _, _, _ = bundle.build(conn)
+    assert json.loads(works_b.splitlines()[0])["venue"] == "BMC Medicine"
 
 
 def test_empty_caveats_never_ship() -> None:

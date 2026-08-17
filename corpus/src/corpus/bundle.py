@@ -43,7 +43,7 @@ MANIFEST_NAME = "latest.json"
 # kept_text + a quality + at least one finding. The three conditions are the whole
 # inclusion rule; everything else in the corpus is out of the client profile.
 WORKS_SQL = """
-SELECT w.work_id, w.doi, w.title, w.year, w.authors, w.quality, w.quality_source,
+SELECT w.work_id, w.doi, w.title, w.venue, w.year, w.authors, w.quality, w.quality_source,
        w.study_type, w.evidence_grade
 FROM works w
 WHERE w.status = 'kept_text' AND w.quality IS NOT NULL
@@ -91,14 +91,14 @@ def authors_array(raw: str | None) -> list[str]:
 
 
 def work_row(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
-    work_id, doi, title, year, authors, quality, quality_source, study_type, grade = row
+    work_id, doi, title, venue, year, authors, quality, quality_source, study_type, grade = row
     return {
         "work_id": work_id,
         "doi": doi,
         "title": title,
-        # Not stored by the crawler; rehydrating it from OpenAlex/EPMC is the next
-        # contract item. The key ships as null so its arrival is not a shape change.
-        "venue": None,
+        # Rehydrated by venue.py, not stored by the crawler. Still null for the works
+        # neither OpenAlex nor EPMC could name; the key is always present.
+        "venue": venue,
         "year": year,
         "authors": authors_array(authors),
         "quality": quality,
