@@ -34,6 +34,11 @@ WORK_COLUMNS = {
     # Set when findings extraction has read the work, including when it produced no
     # findings, so the extraction runner is a no-op on restart.
     "extracted_at": "TEXT",
+    # The single 0-1 scalar the client bundle filters on, composed from relevance /
+    # gate_p5 / evidence_grade by quality.py, plus which judgment it came from.
+    # Derived, not authoritative: `corpus quality` rewrites both from scratch.
+    "quality": "REAL",
+    "quality_source": "TEXT",
 }
 
 ABSTRACTS_SCHEMA = """

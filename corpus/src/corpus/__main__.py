@@ -29,6 +29,7 @@ from . import (
     index,
     judge,
     lexical,
+    quality,
     rerank,
     sample,
 )
@@ -513,6 +514,18 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_quality(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    n = quality.recompute(conn)
+    _log(f"composed quality for {n} works")
+    for source, rows, mean, lo, hi in conn.execute(quality.TOTALS):
+        _log(f"  [{source}] n={rows} mean {mean:.3f} range {lo:.3f}-{hi:.3f}")
+    rows, mean, lo, hi = conn.execute(quality.SHIPPABLE).fetchone()
+    if rows:
+        _log(f"  shippable (has findings): n={rows} mean {mean:.3f} range {lo:.3f}-{hi:.3f}")
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     a, b = _read_verdicts(args.a), _read_verdicts(args.b)
     ag = compare.agreement(a, b, args.threshold)
@@ -694,6 +707,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
     s.add_argument("--seed", type=int, default=distill.SEED)
     s.set_defaults(func=cmd_gate)
+
+    s = sub.add_parser("quality", help="recompose the bundle's quality scalar for every work")
+    s.set_defaults(func=cmd_quality)
 
     s = sub.add_parser("compare", help="agreement between two classify runs")
     s.add_argument("--a", type=Path, required=True)
