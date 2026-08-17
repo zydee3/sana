@@ -335,7 +335,10 @@ def run_claude(prompt: str, model: str) -> tuple[str, Usage]:
         raise ExtractError(f"claude -p failed to run: {e}") from e
     seconds = time.monotonic() - started
     if proc.returncode != 0:
-        raise ExtractError(f"claude -p exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+        # Subscription and spend-limit refusals come out on stdout, not stderr, so an
+        # stderr-only message reads as empty and hides why a whole run stopped.
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise ExtractError(f"claude -p exited {proc.returncode}: {detail[:200]}")
     try:
         wrapper = json.loads(proc.stdout)
     except json.JSONDecodeError as e:

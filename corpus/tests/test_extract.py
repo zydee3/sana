@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from typing import Any
 
 import pytest
@@ -229,3 +230,16 @@ def test_run_leaves_a_failed_batch_pending_and_brakes() -> None:
     done, failed, _ = extract.run(conn, lambda _m: None, runner=runner, workers=1, brake=2)
     assert done == 0 and failed == 2  # braked after two failed batches, rest untouched
     assert len(extract.pending_ids(conn)) == 6
+
+
+def test_nonzero_exit_reports_stdout_when_stderr_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI prints spend-limit refusals on stdout; the error must carry them."""
+
+    class Proc:
+        returncode = 1
+        stdout = "You've hit your monthly spend limit"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Proc())
+    with pytest.raises(ExtractError, match="monthly spend limit"):
+        extract.run_claude("prompt", "sonnet")

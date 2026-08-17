@@ -72,7 +72,9 @@ def run_claude(prompt: str, model: str) -> str:
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ClassifyError(f"claude -p failed to run: {e}") from e
     if proc.returncode != 0:
-        raise ClassifyError(f"claude -p exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+        # Subscription and spend-limit refusals come out on stdout, not stderr.
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise ClassifyError(f"claude -p exited {proc.returncode}: {detail[:200]}")
     return _extract_result(proc.stdout)
 
 
