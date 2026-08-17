@@ -232,6 +232,41 @@ def test_run_leaves_a_failed_batch_pending_and_brakes() -> None:
     assert len(extract.pending_ids(conn)) == 6
 
 
+def test_run_sleeps_off_a_quota_refusal_instead_of_braking() -> None:
+    """A refused window is a wait: the same works are retried after the reset, not lost."""
+    conn = _conn()
+    _store_work(conn, _work("W1"))
+    slept: list[float] = []
+    calls: list[int] = []
+
+    def runner(prompt: str, model: str) -> tuple[str, Usage]:
+        calls.append(1)
+        if len(calls) <= 2:  # _attempt retries once, so a refused batch is two calls
+            raise ExtractError("claude -p exited 1: You've hit your monthly spend limit")
+        return json.dumps([{"paper": 1, "findings": [_raw()]}]), Usage(1000, 50, 0, 0.01, 1.0)
+
+    done, failed, _ = extract.run(
+        conn, lambda _m: None, runner=runner, workers=1, brake=1, sleep=slept.append
+    )
+    assert (done, failed) == (1, 0) and len(slept) == 1
+    assert extract.pending_ids(conn) == []
+
+
+def test_run_stops_spending_a_window_at_the_budget() -> None:
+    conn = _conn()
+    for i in range(3):
+        _store_work(conn, _work(f"W{i}"))
+    slept: list[float] = []
+
+    def runner(prompt: str, model: str) -> tuple[str, Usage]:
+        return json.dumps([{"paper": 1, "findings": [_raw()]}]), Usage(1000, 50, 0, 0.01, 1.0)
+
+    done, _, _ = extract.run(
+        conn, lambda _m: None, runner=runner, workers=1, per_window=1, sleep=slept.append
+    )
+    assert done == 3 and len(slept) == 2  # one sleep between each work, none before the first
+
+
 def test_nonzero_exit_reports_stdout_when_stderr_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI prints spend-limit refusals on stdout; the error must carry them."""
 

@@ -159,6 +159,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         only=args.ids.read_text().split() if args.ids else None,
         dry_run=args.dry_run,
         report=report,
+        per_window=args.per_window,
     )
     if out is not None:
         out.close()
@@ -575,6 +576,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--workers", type=int, default=2)
     s.add_argument("--batch", type=int, default=extract.BATCH_SIZE, help="works per claude call")
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.add_argument(
+        "--per-window",
+        type=int,
+        default=extract.PER_WINDOW,
+        help="works per 5h quota window, then sleep to reset (0 = spend the whole window)",
+    )
     s.add_argument("--min-relevance", type=int, default=7)
     s.add_argument("--ids", type=Path, default=None, help="only these work ids (one per line)")
     s.add_argument("--dry-run", action="store_true", help="extract and validate, store nothing")

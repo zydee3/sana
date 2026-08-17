@@ -93,6 +93,25 @@ def test_missing_statusline_does_not_block(tmp_path: Path) -> None:
     assert judge.quota_wait_s(time.time(), tmp_path / "absent.json") == 0.0
 
 
+def test_quota_refusal_matches_the_cli_spend_limit_text() -> None:
+    refusal = "claude -p exited 1: You've hit your monthly spend limit · raise it at claude.ai"
+    assert judge.is_quota_refusal(refusal)
+    assert not judge.is_quota_refusal("claude -p exited 1: reply is not JSON")
+
+
+def test_next_reset_rolls_a_stale_window_forward(tmp_path: Path) -> None:
+    now = time.time()
+    ahead = _statusline(tmp_path / "a.json", 99, 20, now + 600)
+    assert judge.next_reset_s(now, ahead) == pytest.approx(660.0)
+    # resets_at from two windows ago: the current window ends 1h from now, not in the past.
+    behind = _statusline(tmp_path / "b.json", 99, 20, now - 2 * judge.WINDOW_S + 3600)
+    assert judge.next_reset_s(now, behind) == pytest.approx(3660.0)
+
+
+def test_next_reset_without_a_statusline_is_a_short_retry(tmp_path: Path) -> None:
+    assert judge.next_reset_s(time.time(), tmp_path / "absent.json") == judge.UNKNOWN_RESET_S
+
+
 def test_pending_skips_judged_and_non_kept_rows() -> None:
     conn = _conn()
     _work(conn, "W1")

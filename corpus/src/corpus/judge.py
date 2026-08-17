@@ -13,17 +13,20 @@ also needs it. Before every round the runner reads ~/.claude/statusline-latest.j
 sleeps until reset if either window is above QUOTA_CEILING. A file older than STALE_S
 carries no signal (usually nothing is updating it) and is treated as go, not stop.
 
-That gate cannot see everything — a monthly spend cap makes every call fail instantly
-and appears nowhere in rate_limits — so failure itself is the backstop: FAILURE_BRAKE
-batches failing in a row stops the run. Without it a dead account burns the whole
-pending list in futile spawns (338k works in 74 minutes, observed 2026-08-13).
+That gate is blind whenever the statusline is stale (nothing updates it outside an
+interactive session), so failure is the backstop: FAILURE_BRAKE batches failing in a row
+stops the run. Without it a dead account burns the whole pending list in futile spawns
+(338k works in 74 minutes, observed 2026-08-13). A quota refusal is the exception — see
+`is_quota_refusal` — because waiting out the window is the correct response to it.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
+import re
 import sqlite3
 import time
 from collections.abc import Callable, Sequence
@@ -39,6 +42,14 @@ QUOTA_CEILING = 85.0
 STALE_S = 1800.0
 SLEEP_CHUNK_S = 300.0
 FAILURE_BRAKE = 5
+WINDOW_S = 5 * 3600.0
+UNKNOWN_RESET_S = 1800.0
+
+# An exhausted 5h window refuses as a *spend* limit: past the included quota a call would
+# bill as extra spend, and that is capped. So this text means "wait for the window", not
+# "the account is broken" (measured 2026-08-17: every mid-window probe refused, every
+# probe just after a window reset succeeded).
+_REFUSAL = re.compile(r"spend limit|usage limit|rate limit", re.IGNORECASE)
 
 Log = Callable[[str], None]
 
@@ -75,6 +86,28 @@ def quota_wait_s(now: float, path: Path = STATUSLINE) -> float:
         if isinstance(w, dict) and float(w.get("used_percentage", 0.0)) > QUOTA_CEILING
     ]
     return max(waits, default=0.0)
+
+
+def is_quota_refusal(error: str) -> bool:
+    """True when a failed call was refused for quota rather than broken by anything else."""
+    return bool(_REFUSAL.search(error))
+
+
+def next_reset_s(now: float, path: Path = STATUSLINE) -> float:
+    """Seconds until the 5h window rolls over.
+
+    A stale statusline is still usable here: the window is a fixed 5h cadence, so an old
+    `resets_at` rolls forward to the current one. Without a readable file the caller waits
+    UNKNOWN_RESET_S and retries — cheap, since a refused call costs nothing.
+    """
+    try:
+        data = json.loads(path.read_text())
+        resets = float(data["rate_limits"]["five_hour"]["resets_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return UNKNOWN_RESET_S
+    if resets <= now:
+        resets += WINDOW_S * math.ceil((now - resets) / WINDOW_S)
+    return resets - now + 60.0
 
 
 def wait_for_quota(log: Log, sleep: Callable[[float], None] = time.sleep) -> float:

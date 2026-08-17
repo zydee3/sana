@@ -42,7 +42,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from .judge import Log, wait_for_quota
+from .judge import Log, is_quota_refusal, next_reset_s, wait_for_quota
 
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 TIMEOUT_S = 1800
@@ -56,6 +56,13 @@ CAVEATS_MIN_CHARS = 10
 # p99 of the >=7 pool is ~12.5k words, so this affects a handful of outliers.
 MAX_WORK_WORDS = 14000
 FAILURE_BRAKE = 5
+# One 5h window buys ~116 works at 4 workers, and it is the same window the driver loop
+# spends: a run that takes all of it leaves every driver iteration refused until reset
+# (observed 2026-08-17, four iterations lost in a row). Stop short and sleep instead.
+PER_WINDOW = 80
+# A window this run never gets through means the account is refusing for something other
+# than the cadence; stop rather than sleep forever.
+MAX_WINDOW_WAITS = 12
 
 # Caveats that say nothing. The contract makes caveats mandatory precisely because the
 # answer-time model must carry them, so "none" is a failed extraction, not a value.
@@ -487,23 +494,44 @@ def run(
     report: Callable[[WorkResult, Usage], None] | None = None,
     runner: Runner = run_claude,
     brake: int = FAILURE_BRAKE,
+    per_window: int = PER_WINDOW,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[int, int, Usage]:
     """Extract until the pool is empty (or `limit` works are done).
 
     Returns (works done, works failed, total usage). `dry_run` runs the calls and the
     validation but writes nothing, which is how a calibration slice is measured.
+
+    The run is expected to outlive many 5h quota windows: it stops after `per_window`
+    works and sleeps to the next reset, and a group refused for quota is slept off and
+    retried rather than counted against the brake.
     """
     ids = pending_ids(conn, min_relevance=min_relevance, seed=seed, only=only)[:limit]
     batches = [ids[i : i + batch_size] for i in range(0, len(ids), batch_size)]
     log(f"extracting {len(ids)} works in {len(batches)} batches of {batch_size}, {model}")
-    done = failed = streak = n_findings = 0
+    done = failed = streak = n_findings = in_window = 0
     total = Usage()
     last_error = ""
+
+    def sleep_to_reset(why: str) -> None:
+        nonlocal in_window
+        wait = next_reset_s(time.time())
+        log(f"  {why}; sleeping {wait / 60:.0f}min to the next quota window")
+        sleep(wait)
+        in_window = 0
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for start in range(0, len(batches), workers):
             wait_for_quota(log)
+            if per_window and in_window >= per_window:
+                sleep_to_reset(f"{in_window} works this window (budget {per_window})")
             group = [load_works(conn, b) for b in batches[start : start + workers]]
-            outcomes = list(pool.map(lambda w: _attempt(w, model, runner), group))
+            for _ in range(MAX_WINDOW_WAITS):
+                outcomes = list(pool.map(lambda w: _attempt(w, model, runner), group))
+                errors = [e for _, _, e in outcomes if e]
+                if len(errors) < len(group) or not all(is_quota_refusal(e) for e in errors):
+                    break
+                sleep_to_reset(f"all {len(group)} calls refused for quota")
             for works, (results, usage, error) in zip(group, outcomes, strict=True):
                 _add(total, usage)
                 if not results:
@@ -513,6 +541,7 @@ def run(
                     continue
                 streak = 0
                 done += len(results)
+                in_window += len(results)
                 n_findings += sum(len(r.findings) for r in results)
                 if report is not None:
                     for r in results:
