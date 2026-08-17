@@ -12,6 +12,7 @@ dependencies = [
     "scikit-learn",
     "sqlite-vec>=0.1.9",
     "tokenizers",
+    "zstandard>=0.25.0",
 ]
 
 [dependency-groups]

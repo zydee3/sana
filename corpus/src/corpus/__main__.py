@@ -18,6 +18,7 @@ import numpy as np
 
 from . import (
     backfill,
+    bundle,
     chunk,
     compare,
     db,
@@ -526,6 +527,24 @@ def cmd_quality(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bundle(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db, read_only=True)
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%MZ")
+    published = bundle.publish(conn, args.out, now)
+    m = published.manifest
+    verb = "published" if published.changed else "unchanged, already published"
+    _log(f"{verb} {m['bundle_id']} -> {args.out}")
+    stats = bundle.verify(args.out)
+    ratio = stats["bytes_compressed"] / stats["bytes_raw"]
+    _log(f"  works={stats['works']} findings={stats['findings']}")
+    _log(
+        f"  {stats['bytes_raw'] / 1e6:.1f}MB raw -> "
+        f"{stats['bytes_compressed'] / 1e6:.1f}MB zst ({ratio:.1%})"
+    )
+    _log(f"  encoder {m['encoder']['name']} dim {m['encoder']['dim']}")
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     a, b = _read_verdicts(args.a), _read_verdicts(args.b)
     ag = compare.agreement(a, b, args.threshold)
@@ -710,6 +729,10 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("quality", help="recompose the bundle's quality scalar for every work")
     s.set_defaults(func=cmd_quality)
+
+    s = sub.add_parser("bundle", help="publish the client bundle (manifest + works/findings)")
+    s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)
+    s.set_defaults(func=cmd_bundle)
 
     s = sub.add_parser("compare", help="agreement between two classify runs")
     s.add_argument("--a", type=Path, required=True)
