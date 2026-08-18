@@ -289,3 +289,72 @@ def test_verify_rejects_a_manifest_that_undercounts_tombstones(tmp_path: Path) -
     (out / "latest.json").write_text(json.dumps(manifest))
     with pytest.raises(bundle.BundleError, match="tombstone counts"):
         bundle.verify(out)
+
+
+def test_audit_passes_on_a_freshly_published_bundle(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    bundle.publish(conn, out, NOW, models_dir=_models_dir(tmp_path))
+    report = bundle.audit(conn, out)
+    assert report["problems"] == []
+    assert report["checked"] == {"works": 1, "findings": 2, "ledger": 3}
+    assert not any(report["drift"].values())
+
+
+def test_audit_reports_db_drift_without_calling_it_a_problem(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    bundle.publish(conn, out, NOW, models_dir=_models_dir(tmp_path))
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    report = bundle.audit(conn, out)
+    assert report["problems"] == []
+    assert report["drift"]["works_added"] == 1 and report["drift"]["findings_added"] == 1
+
+
+def test_audit_catches_a_shipped_row_that_drifted_from_the_db(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    bundle.publish(conn, out, NOW, models_dir=_models_dir(tmp_path))
+    conn.execute("UPDATE works SET quality = 0.1 WHERE work_id = 'W1'")
+    conn.commit()
+    problems = bundle.audit(conn, out)["problems"]
+    assert problems == ["work W1: quality differ from the db"]
+
+
+def test_audit_catches_a_retracted_work_still_live_in_the_published_bundle(tmp_path: Path) -> None:
+    """The Gap 3 guarantee, checked against the bundle on disk rather than the publisher."""
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    bundle.publish(conn, out, NOW, models_dir=_models_dir(tmp_path))
+    conn.execute("UPDATE works SET status = 'retracted' WHERE work_id = 'W1'")
+    conn.commit()
+    problems = bundle.audit(conn, out)["problems"]
+    assert "work W1 is retracted and still ships as a live row" in problems
+
+
+def test_audit_catches_an_anchor_quote_that_no_longer_matches_its_chunk(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    bundle.publish(conn, out, NOW, models_dir=_models_dir(tmp_path))
+    # A re-clean shifts the chunk text under a stored span; the bundle keeps the old quote.
+    conn.execute("UPDATE chunks SET text = 'xxxx body text here' WHERE chunk_id = 'W1#0'")
+    conn.commit()
+    problems = bundle.audit(conn, out)["problems"]
+    assert sorted(problems) == [
+        "finding f_a: anchor quote is not the text at its span",
+        "finding f_b: anchor quote is not the text at its span",
+    ]
+
+
+def test_audit_catches_a_shipped_id_that_is_neither_live_nor_tombstoned(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    bundle.publish(conn, out, NOW, models_dir=_models_dir(tmp_path))
+    # A ledger id with no live row and no tombstone is a row the client can never lose.
+    conn.execute(
+        "INSERT INTO shipped (kind, row_id, first_shipped) VALUES ('finding', 'f_gone', ?)", (NOW,)
+    )
+    conn.commit()
+    problems = bundle.audit(conn, out)["problems"]
+    assert problems == ["finding f_gone shipped once but is neither live nor tombstoned"]

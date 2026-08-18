@@ -324,13 +324,20 @@ def publish(
     return Published(manifest, changed=True)
 
 
+def read_published(out_dir: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """The client's side of the wire: manifest plus the decompressed payloads it names."""
+    manifest = json.loads((out_dir / MANIFEST_NAME).read_text())
+    decompressor = zstandard.ZstdDecompressor()
+    payloads = {
+        key: decompressor.decompress((out_dir / name).read_bytes())
+        for key, name in manifest["files"].items()
+    }
+    return manifest, payloads
+
+
 def verify(out_dir: Path) -> dict[str, Any]:
     """Re-read what was published, as a client would, and check it against its manifest."""
-    manifest = json.loads((out_dir / MANIFEST_NAME).read_text())
-    payloads: dict[str, bytes] = {}
-    decompressor = zstandard.ZstdDecompressor()
-    for key, name in manifest["files"].items():
-        payloads[key] = decompressor.decompress((out_dir / name).read_bytes())
+    manifest, payloads = read_published(out_dir)
     content = digest(payloads["works"], payloads["findings"])
     if manifest["files"]["works"] != f"works-{content[:12]}.jsonl.zst":
         raise BundleError("published payload does not match its content-addressed name")
@@ -353,4 +360,109 @@ def verify(out_dir: Path) -> dict[str, Any]:
         "tombstones": {"works": len(dead_works), "findings": len(dead_findings)},
         "bytes_raw": len(payloads["works"]) + len(payloads["findings"]),
         "bytes_compressed": compressed,
+    }
+
+
+# The published quote must still be the bytes the chunk holds at the anchor's span: it is
+# what the client renders as evidence under a claim, and a re-clean or re-chunk moves text
+# under a stored span silently.
+ANCHOR_SQL = """
+SELECT f.finding_id, substr(c.text, f.char_start + 1, f.char_end - f.char_start)
+FROM findings f JOIN chunks c ON c.chunk_id = f.anchor_chunk_id
+WHERE f.finding_id IN ({placeholders})
+"""
+
+STATUS_SQL = "SELECT work_id, status FROM works WHERE work_id IN ({placeholders})"
+
+SLICE = 500
+
+
+def _by_id(conn: sqlite3.Connection, sql: str, ids: list[str]) -> dict[str, Any]:
+    """Look up ids in slices — a bundle carries more of them than SQLite takes per query."""
+    out: dict[str, Any] = {}
+    for start in range(0, len(ids), SLICE):
+        chunk = ids[start : start + SLICE]
+        query = sql.format(placeholders=",".join("?" * len(chunk)))
+        out.update({str(row[0]): row[1] for row in conn.execute(query, chunk)})
+    return out
+
+
+def audit(conn: sqlite3.Connection, out_dir: Path) -> dict[str, Any]:
+    """Read the published bundle as a client would and check it against corpus.db.
+
+    verify() proves a bundle agrees with its own manifest; a tampered or truncated
+    payload is all it can catch. This proves the bundle still says what the database
+    says — that no shipped row drifted from its source, no retracted work is live, no
+    anchor quote has moved, and every id the ledger claims to have shipped is either
+    live or tombstoned. Drift against the database is reported separately from the
+    problems, because it is not a fault: it just means a republish is owed.
+    """
+    manifest, payloads = read_published(out_dir)
+    rows = {k: [json.loads(line) for line in v.splitlines()] for k, v in payloads.items()}
+    works, dead_works = split(rows["works"])
+    findings, dead_findings = split(rows["findings"])
+    shipped_works = {w["work_id"]: w for w in works}
+    shipped_findings = {f["finding_id"]: f for f in findings}
+
+    problems: list[str] = []
+    db_works = {str(r[0]): work_row(r) for r in conn.execute(WORKS_SQL)}
+    db_findings = {str(r[0]): finding_row(r) for r in conn.execute(FINDINGS_SQL)}
+
+    for shipped, current, label in (
+        (shipped_works, db_works, "work"),
+        (shipped_findings, db_findings, "finding"),
+    ):
+        for row_id, row in sorted(shipped.items()):
+            live = current.get(row_id)
+            if live is None:  # left the shippable population: drift, reported below
+                continue
+            fields = sorted(k for k in live if live[k] != row.get(k))
+            if fields:
+                problems.append(f"{label} {row_id}: {', '.join(fields)} differ from the db")
+
+    statuses = _by_id(conn, STATUS_SQL, sorted(shipped_works))
+    problems += [
+        f"work {wid} is {statuses[wid]} and still ships as a live row"
+        for wid in sorted(shipped_works)
+        if statuses.get(wid) != "kept_text"
+    ]
+
+    spans = _by_id(conn, ANCHOR_SQL, sorted(shipped_findings))
+    problems += [
+        f"finding {fid}: anchor quote is not the text at its span"
+        for fid, row in sorted(shipped_findings.items())
+        if spans.get(fid) != row["anchor"]["quote"]
+    ]
+
+    ledger_size = ledger_uncovered = 0
+    for kind, key, live_ids, dead in (
+        ("work", "work_id", set(shipped_works), dead_works),
+        ("finding", "finding_id", set(shipped_findings), dead_findings),
+    ):
+        ledger = {str(r[0]) for r in conn.execute(SHIPPED_SQL, (kind,))}
+        uncovered = sorted(ledger - live_ids - {r[key] for r in dead})
+        ledger_size += len(ledger)
+        ledger_uncovered += len(uncovered)
+        problems += [
+            f"{kind} {row_id} shipped once but is neither live nor tombstoned"
+            for row_id in uncovered
+        ]
+
+    return {
+        "bundle_id": manifest["bundle_id"],
+        "counts": {"works": len(works), "findings": len(findings)},
+        "tombstones": {"works": len(dead_works), "findings": len(dead_findings)},
+        "checked": {
+            "works": len(shipped_works),
+            "findings": len(shipped_findings),
+            "ledger": ledger_size,
+        },
+        "drift": {
+            "works_added": len(set(db_works) - set(shipped_works)),
+            "works_removed": len(set(shipped_works) - set(db_works)),
+            "findings_added": len(set(db_findings) - set(shipped_findings)),
+            "findings_removed": len(set(shipped_findings) - set(db_findings)),
+        },
+        "uncovered": ledger_uncovered,
+        "problems": problems,
     }

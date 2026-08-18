@@ -590,6 +590,34 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bundle_audit(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db, read_only=True)
+    report = bundle.audit(conn, args.out)
+    c, t, k, d = report["counts"], report["tombstones"], report["checked"], report["drift"]
+    _log(f"audit {report['bundle_id']} in {args.out}")
+    _log(f"  live works={c['works']} findings={c['findings']}")
+    _log(f"  tombstones works={t['works']} findings={t['findings']}")
+    _log(
+        f"  checked {k['works']} work rows, {k['findings']} finding rows + anchors, "
+        f"{k['ledger']} ledger ids ({report['uncovered']} uncovered)"
+    )
+    _log(
+        f"  db drift: works +{d['works_added']}/-{d['works_removed']} "
+        f"findings +{d['findings_added']}/-{d['findings_removed']}"
+    )
+    for problem in report["problems"][:20]:
+        _log(f"  PROBLEM {problem}")
+    extra = len(report["problems"]) - 20
+    if extra > 0:
+        _log(f"  ... and {extra} more")
+    if report["problems"]:
+        _log(f"  {len(report['problems'])} problems")
+        return 1
+    stale = any(d.values())
+    _log("  clean" + (" (republish owed: the db has moved)" if stale else " and current"))
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     a, b = _read_verdicts(args.a), _read_verdicts(args.b)
     ag = compare.agreement(a, b, args.threshold)
@@ -797,6 +825,10 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("bundle", help="publish the client bundle (manifest + works/findings)")
     s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)
     s.set_defaults(func=cmd_bundle)
+
+    s = sub.add_parser("bundle-audit", help="check the published bundle against corpus.db")
+    s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)
+    s.set_defaults(func=cmd_bundle_audit)
 
     s = sub.add_parser("compare", help="agreement between two classify runs")
     s.add_argument("--a", type=Path, required=True)
