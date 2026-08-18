@@ -11,7 +11,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -554,8 +554,13 @@ def cmd_authors(args: argparse.Namespace) -> int:
 
 def cmd_retractions(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    retraction.run(conn, _log, now, args.limit)
+    when = datetime.now(UTC)
+    now = when.strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale_before = None
+    if args.recheck_older_than is not None:
+        stale = when - timedelta(days=args.recheck_older_than)
+        stale_before = stale.strftime("%Y-%m-%dT%H:%M:%SZ")
+    retraction.run(conn, _log, now, args.limit, stale_before=stale_before)
     rows = conn.execute(
         "SELECT status, count(*) FROM works WHERE retraction_checked_at IS NOT NULL GROUP BY 1"
     ).fetchall()
@@ -780,6 +785,13 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("retractions", help="re-check the shippable pool for retractions")
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.add_argument(
+        "--recheck-older-than",
+        type=float,
+        default=None,
+        metavar="DAYS",
+        help="also re-check works whose last check is older than DAYS (0 = the whole pool)",
+    )
     s.set_defaults(func=cmd_retractions)
 
     s = sub.add_parser("bundle", help="publish the client bundle (manifest + works/findings)")

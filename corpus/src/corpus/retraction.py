@@ -13,6 +13,13 @@ retraction is an OR over evidence and the sources lag each other: OpenAlex carri
 
 Resumable: work is a pool row with `retraction_checked_at IS NULL`, stamped whether or
 not the work turned out retracted, so a rerun only sees works that arrived since.
+
+The stamp is an as-of date, and the guarantee decays: a work checked a week ago may have
+been retracted since. `stale_before` re-opens rows whose stamp predates it, so a sweep
+before publication can make the bundle's "never ships retracted work" claim as-of
+publication rather than as-of first entry to the pool. Retraction is one-way -- a work
+already flipped to `status='retracted'` never returns to the pool, so re-checks only ever
+cost HTTP.
 """
 
 from __future__ import annotations
@@ -33,9 +40,15 @@ OA_BATCH = 50
 Log = Callable[[str], None]
 Fetch = Callable[[str], Any]
 
-PENDING_SQL = """
+POOL = "status = 'kept_text' AND relevance >= 7"
+PENDING_SQL = f"""
 SELECT work_id, title, year, doi, pmcid FROM works
-WHERE status = 'kept_text' AND relevance >= 7 AND retraction_checked_at IS NULL
+WHERE {POOL} AND retraction_checked_at IS NULL
+ORDER BY work_id
+"""
+STALE_SQL = f"""
+SELECT work_id, title, year, doi, pmcid FROM works
+WHERE {POOL} AND (retraction_checked_at IS NULL OR retraction_checked_at < ?)
 ORDER BY work_id
 """
 
@@ -43,8 +56,14 @@ MARK = "UPDATE works SET status = 'retracted', retraction_checked_at = ? WHERE w
 STAMP = "UPDATE works SET retraction_checked_at = ? WHERE work_id = ?"
 
 
-def pending(conn: sqlite3.Connection, limit: int | None = None) -> list[Paper]:
-    rows = conn.execute(PENDING_SQL).fetchall()
+def pending(
+    conn: sqlite3.Connection, limit: int | None = None, stale_before: str | None = None
+) -> list[Paper]:
+    """Unchecked pool works, plus those stamped before `stale_before` when one is given."""
+    if stale_before is None:
+        rows = conn.execute(PENDING_SQL).fetchall()
+    else:
+        rows = conn.execute(STALE_SQL, (stale_before,)).fetchall()
     return [
         Paper(
             work_id=work_id,
@@ -108,11 +127,13 @@ def run(
     now: str,
     limit: int | None = None,
     fetch: Fetch = get_json,
+    stale_before: str | None = None,
 ) -> dict[str, int]:
     """Re-check the pending pool. Returns counts, including per-source hits."""
-    todo = pending(conn, limit)
+    todo = pending(conn, limit, stale_before)
     slices = (len(todo) + OA_BATCH - 1) // OA_BATCH
-    log(f"retraction: {len(todo)} pool works pending, {slices} slices")
+    scope = "pending" if stale_before is None else f"pending or stamped before {stale_before}"
+    log(f"retraction: {len(todo)} pool works {scope}, {slices} slices")
     stats = {"checked": 0, "retracted": 0, "openalex": 0, "epmc": 0, "both": 0, "deferred": 0}
     for start in range(0, len(todo), OA_BATCH):
         slice_ = todo[start : start + OA_BATCH]
