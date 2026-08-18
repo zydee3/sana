@@ -5,8 +5,13 @@ everything here:
 
 - Only works that are both citable and retrievable ship: status kept_text, a composed
   quality, and at least one finding. kept_miss works have no text and therefore no
-  anchor, and retracted works never appear at all — tombstones for rows already shipped
-  arrive with deltas, one release later.
+  anchor, and retracted works never appear as live rows.
+- A row the client already has can only be withdrawn by a tombstone, because bundles
+  apply by primary key: dropping a row from the payload leaves it in the client's DB
+  forever. So every bundle carries the full tombstone set — every id in the `shipped`
+  ledger that is no longer shippable — rather than only the ids that changed since some
+  base version. Full bundles stay self-sufficient, and a client any number of versions
+  behind converges from the latest one alone.
 - IDs are stable from the first publish. finding_id is already a content hash of
   (work_id, claim); work_id is the crawler's OpenAlex id. Nothing here derives an id
   from row order, chunking or bundle version.
@@ -65,6 +70,9 @@ JOIN works w ON w.work_id = f.work_id
 WHERE w.status = 'kept_text' AND w.quality IS NOT NULL
 ORDER BY f.finding_id
 """
+
+SHIPPED_SQL = "SELECT row_id FROM shipped WHERE kind = ?"
+RECORD_SQL = "INSERT OR IGNORE INTO shipped (kind, row_id, first_shipped) VALUES (?, ?, ?)"
 
 
 class BundleError(RuntimeError):
@@ -130,6 +138,28 @@ def finding_row(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
+def tombstone_rows(conn: sqlite3.Connection, kind: str, live: set[str]) -> list[dict[str, Any]]:
+    """`{id: ..., deleted: true}` for every shipped row of `kind` that is no longer live."""
+    key = f"{kind}_id"
+    gone = sorted({str(r[0]) for r in conn.execute(SHIPPED_SQL, (kind,))} - live)
+    return [{key: row_id, "deleted": True} for row_id in gone]
+
+
+def record_shipped(conn: sqlite3.Connection, kind: str, live: set[str], now: str) -> int:
+    """Add live ids to the ledger. Tombstoned ids stay: they must ship in every bundle."""
+    before = conn.execute("SELECT count(*) FROM shipped WHERE kind = ?", (kind,)).fetchone()[0]
+    conn.executemany(RECORD_SQL, [(kind, row_id, now) for row_id in sorted(live)])
+    conn.commit()
+    return int(
+        conn.execute("SELECT count(*) FROM shipped WHERE kind = ?", (kind,)).fetchone()[0] - before
+    )
+
+
+def split(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(live, tombstones) — the two row shapes that share a payload file."""
+    return [r for r in rows if not r.get("deleted")], [r for r in rows if r.get("deleted")]
+
+
 def validate(works: list[dict[str, Any]], findings: list[dict[str, Any]]) -> None:
     """Contract invariants, checked before anything is written."""
     ids = {w["work_id"] for w in works}
@@ -155,6 +185,17 @@ def validate(works: list[dict[str, Any]], findings: list[dict[str, Any]]) -> Non
     orphans = ids - {f["work_id"] for f in findings}
     if orphans:
         raise BundleError(f"{len(orphans)} works ship with no findings (e.g. {sorted(orphans)[0]})")
+
+
+def validate_tombstones(live: list[dict[str, Any]], dead: list[dict[str, Any]], key: str) -> None:
+    """A tombstone contradicting a live row would make the client's apply order decide."""
+    live_ids = {r[key] for r in live}
+    dead_ids = {r[key] for r in dead}
+    both = live_ids & dead_ids
+    if both:
+        raise BundleError(f"{len(both)} rows are both live and tombstoned (e.g. {sorted(both)[0]})")
+    if len(dead_ids) != len(dead):
+        raise BundleError("duplicate tombstone")
 
 
 def jsonl(rows: list[dict[str, Any]]) -> bytes:
@@ -189,12 +230,35 @@ def encoder_descriptor(models_dir: Path | None = None) -> dict[str, Any]:
     return {"name": spec.name, "dim": spec.dim, "sha256": sha256_file(onnx)}
 
 
-def build(conn: sqlite3.Connection) -> tuple[bytes, bytes, int, int]:
-    """Serialize the shippable population. Returns (works, findings, n_works, n_findings)."""
+@dataclass(frozen=True)
+class Payloads:
+    works: bytes
+    findings: bytes
+    counts: dict[str, int]
+    tombstones: dict[str, int]
+    live_work_ids: set[str]
+    live_finding_ids: set[str]
+
+
+def build(conn: sqlite3.Connection) -> Payloads:
+    """Serialize the shippable population plus the tombstones for everything withdrawn."""
     works = [work_row(r) for r in conn.execute(WORKS_SQL)]
     findings = [finding_row(r) for r in conn.execute(FINDINGS_SQL)]
     validate(works, findings)
-    return jsonl(works), jsonl(findings), len(works), len(findings)
+    work_ids = {w["work_id"] for w in works}
+    finding_ids = {f["finding_id"] for f in findings}
+    dead_works = tombstone_rows(conn, "work", work_ids)
+    dead_findings = tombstone_rows(conn, "finding", finding_ids)
+    validate_tombstones(works, dead_works, "work_id")
+    validate_tombstones(findings, dead_findings, "finding_id")
+    return Payloads(
+        works=jsonl(works + dead_works),
+        findings=jsonl(findings + dead_findings),
+        counts={"works": len(works), "findings": len(findings)},
+        tombstones={"works": len(dead_works), "findings": len(dead_findings)},
+        live_work_ids=work_ids,
+        live_finding_ids=finding_ids,
+    )
 
 
 def publish(
@@ -208,9 +272,13 @@ def publish(
 
     `now` is minute-precision UTC ("2026-08-17T22:40Z") and only names the bundle; the
     identity that matters is the digest, which is a pure function of the rows.
+
+    Writes: publishing records what it shipped in the `shipped` ledger, which is how the
+    next bundle knows what it owes a tombstone.
     """
-    works, findings, n_works, n_findings = build(conn)
-    if not n_works:
+    payloads = build(conn)
+    works, findings = payloads.works, payloads.findings
+    if not payloads.counts["works"]:
         raise BundleError("nothing to publish: no work has both a quality and a finding")
     content = digest(works, findings)
     files = {
@@ -227,11 +295,14 @@ def publish(
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "bundle_id": f"b_{now}_{content[:6]}",
-        # Full bundle. Deltas (and the tombstones they carry) come one release later.
+        # Full bundle, always: it carries every live row and every tombstone, so there is
+        # no chain to walk. `replaces` stays null until deltas are worth their complexity.
         "replaces": None,
         "created_at": now,
         "encoder": encoder_descriptor(models_dir),
-        "counts": {"works": n_works, "findings": n_findings},
+        "counts": payloads.counts,
+        # Rows in the payloads beyond `counts` — withdrawn ids the client marks deleted.
+        "tombstones": payloads.tombstones,
         "files": files,
     }
 
@@ -246,6 +317,10 @@ def publish(
     tmp_manifest = manifest_path.with_suffix(".part")
     tmp_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
     tmp_manifest.rename(manifest_path)
+    # After the files exist: a crash between the two leaves the ledger short, and the next
+    # run re-derives the same payloads and records them. Claiming first could not be undone.
+    record_shipped(conn, "work", payloads.live_work_ids, now)
+    record_shipped(conn, "finding", payloads.live_finding_ids, now)
     return Published(manifest, changed=True)
 
 
@@ -259,16 +334,23 @@ def verify(out_dir: Path) -> dict[str, Any]:
     content = digest(payloads["works"], payloads["findings"])
     if manifest["files"]["works"] != f"works-{content[:12]}.jsonl.zst":
         raise BundleError("published payload does not match its content-addressed name")
-    works = [json.loads(line) for line in payloads["works"].splitlines()]
-    findings = [json.loads(line) for line in payloads["findings"].splitlines()]
+    rows = {k: [json.loads(line) for line in v.splitlines()] for k, v in payloads.items()}
+    works, dead_works = split(rows["works"])
+    findings, dead_findings = split(rows["findings"])
     validate(works, findings)
+    validate_tombstones(works, dead_works, "work_id")
+    validate_tombstones(findings, dead_findings, "finding_id")
     if len(works) != manifest["counts"]["works"] or len(findings) != manifest["counts"]["findings"]:
         raise BundleError("manifest counts disagree with the payloads")
+    declared = manifest.get("tombstones") or {"works": 0, "findings": 0}
+    if len(dead_works) != declared["works"] or len(dead_findings) != declared["findings"]:
+        raise BundleError("manifest tombstone counts disagree with the payloads")
     compressed = sum((out_dir / n).stat().st_size for n in manifest["files"].values())
     return {
         "bundle_id": manifest["bundle_id"],
         "works": len(works),
         "findings": len(findings),
+        "tombstones": {"works": len(dead_works), "findings": len(dead_findings)},
         "bytes_raw": len(payloads["works"]) + len(payloads["findings"]),
         "bytes_compressed": compressed,
     }

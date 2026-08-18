@@ -97,13 +97,13 @@ def test_only_citable_and_retrievable_works_ship() -> None:
     _work(conn, "W5", quality=None, quality_source=None)
     _finding(conn, "f_e", "W5")
 
-    works_b, findings_b, n_works, n_findings = bundle.build(conn)
-    assert (n_works, n_findings) == (1, 1)
-    row = json.loads(works_b.splitlines()[0])
+    built = bundle.build(conn)
+    assert built.counts == {"works": 1, "findings": 1}
+    row = json.loads(built.works.splitlines()[0])
     assert row["work_id"] == "W1"
     assert row["authors"] == ["Murray JK", "Knudson S."]
     assert row["venue"] is None  # unset in the fixture; the key ships either way
-    anchor = json.loads(findings_b.splitlines()[0])["anchor"]
+    anchor = json.loads(built.findings.splitlines()[0])["anchor"]
     assert anchor == {
         "chunk_id": "W1#0",
         "section": "results",
@@ -117,8 +117,7 @@ def test_a_rehydrated_venue_ships_on_the_work_record() -> None:
     conn = _conn()
     _work(conn, "W1", venue="BMC Medicine", venue_source="openalex")
     _finding(conn, "f_a", "W1")
-    works_b, _, _, _ = bundle.build(conn)
-    assert json.loads(works_b.splitlines()[0])["venue"] == "BMC Medicine"
+    assert json.loads(bundle.build(conn).works.splitlines()[0])["venue"] == "BMC Medicine"
 
 
 def test_empty_caveats_never_ship() -> None:
@@ -173,10 +172,10 @@ def test_new_data_produces_a_new_bundle_id_and_new_files(tmp_path: Path) -> None
 
 def test_ids_do_not_move_when_other_rows_arrive(tmp_path: Path) -> None:
     conn = _populated(tmp_path)
-    before = [json.loads(line) for line in bundle.build(conn)[1].splitlines()]
+    before = [json.loads(line) for line in bundle.build(conn).findings.splitlines()]
     _work(conn, "W0")  # sorts ahead of W1
     _finding(conn, "f_z", "W0")
-    after = {json.loads(line)["finding_id"] for line in bundle.build(conn)[1].splitlines()}
+    after = {json.loads(line)["finding_id"] for line in bundle.build(conn).findings.splitlines()}
     assert {f["finding_id"] for f in before} <= after
 
 
@@ -203,3 +202,90 @@ def test_publishing_nothing_is_an_error(tmp_path: Path) -> None:
     conn = _conn()
     with pytest.raises(bundle.BundleError, match="nothing to publish"):
         bundle.publish(conn, tmp_path / "bundles", NOW, models_dir=_models_dir(tmp_path))
+
+
+def _rows(out: Path, manifest: dict[str, object], key: str) -> list[dict[str, object]]:
+    import zstandard
+
+    files = manifest["files"]
+    assert isinstance(files, dict)
+    raw = zstandard.ZstdDecompressor().decompress((out / files[key]).read_bytes())
+    return [json.loads(line) for line in raw.splitlines()]
+
+
+def test_a_retracted_work_leaves_as_a_tombstone_with_its_findings(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    models = _models_dir(tmp_path)
+    bundle.publish(conn, out, NOW, models_dir=models)
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    bundle.publish(conn, out, "2026-09-01T00:00Z", models_dir=models)
+
+    conn.execute("UPDATE works SET status='retracted' WHERE work_id='W1'")
+    conn.commit()
+    third = bundle.publish(conn, out, "2026-09-02T00:00Z", models_dir=models)
+    assert third.manifest["counts"] == {"works": 1, "findings": 1}
+    assert third.manifest["tombstones"] == {"works": 1, "findings": 2}
+    works = _rows(out, third.manifest, "works")
+    assert {"work_id": "W1", "deleted": True} in works
+    assert [w["work_id"] for w in works if not w.get("deleted")] == ["W2"]
+    dead = {f["finding_id"] for f in _rows(out, third.manifest, "findings") if f.get("deleted")}
+    assert dead == {"f_a", "f_b"}
+    assert bundle.verify(out)["tombstones"] == {"works": 1, "findings": 2}
+
+
+def test_tombstones_repeat_in_every_later_bundle(tmp_path: Path) -> None:
+    """A client several versions behind must converge from the latest bundle alone."""
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    models = _models_dir(tmp_path)
+    bundle.publish(conn, out, NOW, models_dir=models)
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    conn.execute("UPDATE works SET status='retracted' WHERE work_id='W1'")
+    conn.commit()
+    bundle.publish(conn, out, "2026-09-01T00:00Z", models_dir=models)
+    _work(conn, "W3")
+    _finding(conn, "f_d", "W3")
+    later = bundle.publish(conn, out, "2026-09-02T00:00Z", models_dir=models)
+    assert later.manifest["tombstones"] == {"works": 1, "findings": 2}
+
+
+def test_a_work_that_never_shipped_leaves_no_tombstone(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    models = _models_dir(tmp_path)
+    _work(conn, "W2", status="retracted")
+    _finding(conn, "f_c", "W2")
+    published = bundle.publish(conn, out, NOW, models_dir=models)
+    assert published.manifest["tombstones"] == {"works": 0, "findings": 0}
+
+
+def test_the_ledger_records_only_what_was_written(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    bundle.publish(conn, out, NOW, models_dir=_models_dir(tmp_path))
+    assert conn.execute("SELECT count(*) FROM shipped WHERE kind='work'").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM shipped WHERE kind='finding'").fetchone()[0] == 2
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    with pytest.raises(bundle.BundleError, match="cannot describe it"):
+        bundle.publish(conn, out, NOW, models_dir=tmp_path / "absent")
+    assert conn.execute("SELECT count(*) FROM shipped").fetchone()[0] == 3
+
+
+def test_verify_rejects_a_manifest_that_undercounts_tombstones(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    models = _models_dir(tmp_path)
+    bundle.publish(conn, out, NOW, models_dir=models)
+    conn.execute("UPDATE works SET status='retracted' WHERE work_id='W1'")
+    conn.commit()
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    manifest = bundle.publish(conn, out, "2026-09-01T00:00Z", models_dir=models).manifest
+    manifest["tombstones"] = {"works": 0, "findings": 0}
+    (out / "latest.json").write_text(json.dumps(manifest))
+    with pytest.raises(bundle.BundleError, match="tombstone counts"):
+        bundle.verify(out)

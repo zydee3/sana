@@ -32,6 +32,7 @@ from . import (
     lexical,
     quality,
     rerank,
+    retraction,
     sample,
     venue,
 )
@@ -540,8 +541,21 @@ def cmd_venue(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_retractions(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    retraction.run(conn, _log, now, args.limit)
+    rows = conn.execute(
+        "SELECT status, count(*) FROM works WHERE retraction_checked_at IS NOT NULL GROUP BY 1"
+    ).fetchall()
+    _log(f"re-checked works by status: {dict(rows)}")
+    return 0
+
+
 def cmd_bundle(args: argparse.Namespace) -> int:
-    conn = db.connect(args.db, read_only=True)
+    # Read-write: publishing records what it shipped, so the next bundle knows what it owes
+    # a tombstone.
+    conn = db.connect(args.db)
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%MZ")
     published = bundle.publish(conn, args.out, now)
     m = published.manifest
@@ -550,6 +564,8 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     stats = bundle.verify(args.out)
     ratio = stats["bytes_compressed"] / stats["bytes_raw"]
     _log(f"  works={stats['works']} findings={stats['findings']}")
+    tombs = stats["tombstones"]
+    _log(f"  tombstones: works={tombs['works']} findings={tombs['findings']}")
     _log(
         f"  {stats['bytes_raw'] / 1e6:.1f}MB raw -> "
         f"{stats['bytes_compressed'] / 1e6:.1f}MB zst ({ratio:.1%})"
@@ -746,6 +762,10 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("venue", help="rehydrate journal names for the shippable pool")
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
     s.set_defaults(func=cmd_venue)
+
+    s = sub.add_parser("retractions", help="re-check the shippable pool for retractions")
+    s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.set_defaults(func=cmd_retractions)
 
     s = sub.add_parser("bundle", help="publish the client bundle (manifest + works/findings)")
     s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)

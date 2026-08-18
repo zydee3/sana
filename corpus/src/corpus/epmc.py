@@ -18,6 +18,7 @@ from .models import Paper
 
 SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 BATCH = 25
+RETRACTED_PUB_TYPE = "retracted publication"
 
 Fetch = Callable[[str], Any]
 
@@ -91,6 +92,19 @@ def fetch_venues(papers: Sequence[Paper], fetch: Fetch = get_json) -> dict[str, 
 
 def _journal(r: dict[str, Any]) -> str:
     return str(((r.get("journalInfo") or {}).get("journal") or {}).get("title") or "")
+
+
+def fetch_retracted(papers: Sequence[Paper], fetch: Fetch = get_json) -> set[str]:
+    """work_ids EPMC tags "Retracted Publication", batched. The other source is OpenAlex."""
+    out: set[str] = set()
+    for start in range(0, len(papers), BATCH):
+        out |= set(_search(papers[start : start + BATCH], _retracted, fetch))
+    return out
+
+
+def _retracted(r: dict[str, Any]) -> str:
+    types = [str(t).lower() for t in (r.get("pubTypeList") or {}).get("pubType", [])]
+    return RETRACTED_PUB_TYPE if RETRACTED_PUB_TYPE in types else ""
 
 
 def fetch_abstracts(papers: Sequence[Paper], fetch: Fetch = get_json) -> dict[str, str]:

@@ -43,6 +43,10 @@ WORK_COLUMNS = {
     # 'openalex' | 'epmc' | 'missing' — 'missing' is a closed-out row, not a retry.
     "venue": "TEXT",
     "venue_source": "TEXT",
+    # When retraction.py last asked OpenAlex and Europe PMC whether this work was
+    # retracted. Stamped whether or not it was, so the re-check is a resumable no-op;
+    # a retracted work also has its status flipped, which is what keeps it out of bundles.
+    "retraction_checked_at": "TEXT",
 }
 
 ABSTRACTS_SCHEMA = """
@@ -89,6 +93,19 @@ CREATE INDEX IF NOT EXISTS findings_work ON findings(work_id);
 """
 
 
+# What the client has already been given. A row that was shipped and is no longer
+# shippable (a retraction, most of all) must leave as a tombstone, because the client
+# applies bundles by primary key — a row that merely stops appearing never gets removed.
+SHIPPED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS shipped (
+  kind TEXT NOT NULL,
+  row_id TEXT NOT NULL,
+  first_shipped TEXT NOT NULL,
+  PRIMARY KEY (kind, row_id)
+);
+"""
+
+
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")}
 
@@ -110,6 +127,9 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     if not _columns(conn, "findings"):
         conn.executescript(FINDINGS_SCHEMA)
         applied.append("findings")
+    if not _columns(conn, "shipped"):
+        conn.executescript(SHIPPED_SCHEMA)
+        applied.append("shipped")
     conn.commit()
     return applied
 
