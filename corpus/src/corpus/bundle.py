@@ -29,7 +29,10 @@ import zstandard
 
 from . import embed
 
-SCHEMA_VERSION = 1
+# 2: evidence_grade is derived for every labeled work, so the quality scalar dropped for
+# 65% of shipped works (mean 0.744 -> 0.664). The formula is unchanged, but tau_q has to
+# be re-swept, which is what the version exists to signal.
+SCHEMA_VERSION = 2
 ZSTD_LEVEL = 19
 
 # The server profile's encoder. The client ignores it today (it embeds claim text with

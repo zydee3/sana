@@ -7,15 +7,16 @@ not interchangeable:
 - `relevance` 0-10 is a real sonnet judgment, the gold field, but sparse (26.4k works).
 - `gate_p5` 0-1 is the distilled head's keep score: dense, but a ranker at 0.69
   measured precision, not a judgment.
-- `evidence_grade` 1 (meta-analysis) .. 5 (opinion) is deterministic from study_type
-  and NULL for ~78% of the judged-relevant pool.
+- `evidence_grade` 1 (meta-analysis) .. 5 (opinion) is deterministic from study_type,
+  so it is derived here for every labeled work (`backfill_grades`) rather than only
+  for the ones the publisher graded at scrape time.
 
 So the base comes from whichever judgment exists, and evidence_grade only ever
 discounts it. gate_p5 is scaled by the measured 0.69 precision because that is what
-the number is worth relative to a real judgment. A NULL grade means "no evidence this
-is weak", not "weak": with 78% of the pool unlabeled a pessimistic default would gut
-the bundle, so unknown reads as grade 1. The grade ladder itself is a stated prior,
-not a measurement — it is the one part of this formula nothing has validated yet.
+the number is worth relative to a real judgment. A NULL grade means "no study_type at
+all", which is the only case left after the backfill, and it reads as grade 1: "no
+evidence this is weak", not "weak". The grade ladder itself is a stated prior, not a
+measurement — it is the one part of this formula nothing has validated yet.
 
 Semantics must stay stable across bundles because tau_q is tuned against them:
 changing any constant here bumps the bundle `schema_version`.
@@ -24,6 +25,8 @@ changing any constant here bumps the bundle `schema_version`.
 from __future__ import annotations
 
 import sqlite3
+
+from .models import GRADE_BY_STUDY_TYPE
 
 # Measured precision of the distilled gate at the standard threshold (distill.py's
 # held-out validation). A gate-sourced work can never read as well as the judgment it
@@ -47,6 +50,11 @@ UPDATE works SET
       * (1.0 - ? * (COALESCE(evidence_grade, 1) - 1))
     )), 4)
 WHERE relevance IS NOT NULL OR gate_p5 IS NOT NULL
+"""
+
+BACKFILL_GRADES = """
+UPDATE works SET evidence_grade = CASE study_type {cases} END
+WHERE study_type IS NOT NULL AND evidence_grade IS NULL
 """
 
 TOTALS = """
@@ -78,6 +86,21 @@ def compose(
     grade = evidence_grade if evidence_grade is not None else 1
     scaled = base * (1.0 - GRADE_PENALTY * (grade - 1))
     return round(max(0.0, min(1.0, scaled)), 4), source
+
+
+def backfill_grades(conn: sqlite3.Connection) -> int:
+    """Derive evidence_grade from study_type wherever it is missing. Idempotent.
+
+    The lookup was historically applied only at scrape time, so publisher-labeled works
+    carried a grade and sonnet-labeled ones did not — the discount then depended on
+    where the label came from rather than on the study design, which is exactly the
+    instability the bundle contract forbids. Existing grades are never overwritten:
+    a publisher grade is the same deterministic function of the same field.
+    """
+    cases = " ".join(f"WHEN '{st}' THEN {g}" for st, g in GRADE_BY_STUDY_TYPE.items())
+    cur = conn.execute(BACKFILL_GRADES.format(cases=cases))
+    conn.commit()
+    return cur.rowcount
 
 
 def recompute(conn: sqlite3.Connection) -> int:

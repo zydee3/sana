@@ -518,6 +518,8 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 def cmd_quality(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
+    graded = quality.backfill_grades(conn)
+    _log(f"derived evidence_grade for {graded} labeled works")
     n = quality.recompute(conn)
     _log(f"composed quality for {n} works")
     for source, rows, mean, lo, hi in conn.execute(quality.TOTALS):

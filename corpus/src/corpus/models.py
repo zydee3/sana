@@ -4,21 +4,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Mirrors scraper/models.py GRADE_BY_STUDY_TYPE keys — that lookup stays the single
-# source of truth for evidence_grade; processing only writes study_type.
-STUDY_TYPES = (
-    "meta_analysis",
-    "systematic_review",
-    "rct",
-    "cohort",
-    "case_control",
-    "cross_sectional",
-    "observational",
-    "case_report",
-    "opinion",
-    "qualitative",
-    "other",
-)
+# Mirrors scraper/models.py GRADE_BY_STUDY_TYPE — the ladder is deterministic from
+# study_type, so a work labeled here can be graded here (quality.backfill_grades).
+# The two copies exist because scraper/ is stdlib-only and the projects do not import
+# each other; test_quality asserts this one is complete over STUDY_TYPES.
+GRADE_BY_STUDY_TYPE = {
+    "meta_analysis": 1,
+    "systematic_review": 1,
+    "rct": 2,
+    "cohort": 3,
+    "case_control": 3,
+    "cross_sectional": 4,
+    "observational": 4,
+    "case_report": 5,
+    "opinion": 5,
+    "qualitative": 5,
+    "other": 5,
+}
+
+STUDY_TYPES = tuple(GRADE_BY_STUDY_TYPE)
 
 # Coarse topical bucket, chosen so relevance thresholds can be picked per domain later.
 DOMAINS = (
