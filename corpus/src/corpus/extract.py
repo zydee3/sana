@@ -365,11 +365,14 @@ def run_claude(prompt: str, model: str) -> tuple[str, Usage]:
 Runner = Callable[[str, str], tuple[str, Usage]]
 
 PENDING = """
-SELECT w.work_id FROM works w
+SELECT w.work_id, COALESCE(w.quality, 0.0) FROM works w
 WHERE w.relevance >= ? AND w.status = 'kept_text' AND w.extracted_at IS NULL
   AND EXISTS (SELECT 1 FROM chunks c WHERE c.work_id = w.work_id)
 ORDER BY w.work_id
 """
+
+BY_QUALITY, SHUFFLE = "quality", "shuffle"
+ORDERS = (BY_QUALITY, SHUFFLE)
 
 
 def pending_ids(
@@ -378,11 +381,22 @@ def pending_ids(
     min_relevance: int = 7,
     seed: int = 7,
     only: Sequence[str] | None = None,
+    order: str = BY_QUALITY,
 ) -> list[str]:
-    """Unextracted ids, shuffled — a partial run stays a fair sample of the pool."""
+    """Unextracted ids in the order the budget should be spent.
+
+    The pool outlives the quota that drains it, so the order decides what a bundle
+    holds in the meantime. `quality` puts the works the client ranks highest first;
+    `shuffle` keeps a partial run an unbiased sample of the pool, which is what the
+    yield and drop-rate measurements were taken on.
+    """
     rows = conn.execute(PENDING, (min_relevance,)).fetchall()
     wanted = set(only) if only is not None else None
-    ids = [str(r[0]) for r in rows if wanted is None or r[0] in wanted]
+    kept = [(str(r[0]), float(r[1])) for r in rows if wanted is None or r[0] in wanted]
+    if order == BY_QUALITY:
+        kept.sort(key=lambda r: (-r[1], r[0]))
+        return [work_id for work_id, _ in kept]
+    ids = [work_id for work_id, _ in kept]
     random.Random(seed).shuffle(ids)
     return ids
 
@@ -490,6 +504,7 @@ def run(
     min_relevance: int = 7,
     seed: int = 7,
     only: Sequence[str] | None = None,
+    order: str = BY_QUALITY,
     dry_run: bool = False,
     report: Callable[[WorkResult, Usage], None] | None = None,
     runner: Runner = run_claude,
@@ -506,7 +521,7 @@ def run(
     works and sleeps to the next reset, and a group refused for quota is slept off and
     retried rather than counted against the brake.
     """
-    ids = pending_ids(conn, min_relevance=min_relevance, seed=seed, only=only)[:limit]
+    ids = pending_ids(conn, min_relevance=min_relevance, seed=seed, only=only, order=order)[:limit]
     batches = [ids[i : i + batch_size] for i in range(0, len(ids), batch_size)]
     log(f"extracting {len(ids)} works in {len(batches)} batches of {batch_size}, {model}")
     done = failed = streak = n_findings = in_window = 0

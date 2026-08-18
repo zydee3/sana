@@ -162,6 +162,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         limit=args.limit,
         min_relevance=args.min_relevance,
         only=args.ids.read_text().split() if args.ids else None,
+        order=args.order,
         dry_run=args.dry_run,
         report=report,
         per_window=args.per_window,
@@ -688,6 +689,12 @@ def main(argv: list[str] | None = None) -> int:
         help="works per 5h quota window, then sleep to reset (0 = spend the whole window)",
     )
     s.add_argument("--min-relevance", type=int, default=7)
+    s.add_argument(
+        "--order",
+        choices=extract.ORDERS,
+        default=extract.BY_QUALITY,
+        help="spend the budget best-first (quality) or as an unbiased sample (shuffle)",
+    )
     s.add_argument("--ids", type=Path, default=None, help="only these work ids (one per line)")
     s.add_argument("--dry-run", action="store_true", help="extract and validate, store nothing")
     s.add_argument("--report", type=Path, default=None, help="jsonl of findings, drops and usage")

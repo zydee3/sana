@@ -179,6 +179,17 @@ def test_pending_skips_extracted_chunkless_and_low_relevance_works() -> None:
     assert extract.pending_ids(conn) == ["W1"]
 
 
+def test_pending_ids_spends_the_budget_best_first() -> None:
+    """Quality order is deterministic and ties break on work_id; shuffle keeps the set."""
+    conn = _conn()
+    for work_id, quality in (("W1", 0.7), ("W2", 1.0), ("W3", 0.7), ("W4", None)):
+        _store_work(conn, _work(work_id))
+        conn.execute("UPDATE works SET quality = ? WHERE work_id = ?", (quality, work_id))
+    conn.commit()
+    assert extract.pending_ids(conn) == ["W2", "W1", "W3", "W4"]
+    assert sorted(extract.pending_ids(conn, order=extract.SHUFFLE)) == ["W1", "W2", "W3", "W4"]
+
+
 def test_store_stamps_works_that_produced_nothing() -> None:
     conn = _conn()
     _store_work(conn, _work("W1"))
