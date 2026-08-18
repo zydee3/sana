@@ -50,13 +50,14 @@ def _url(terms: Sequence[str]) -> str:
     return f"{SEARCH_URL}?{urllib.parse.urlencode(params)}"
 
 
-def _search(
-    papers: Sequence[Paper], value: Callable[[dict[str, Any]], str], fetch: Fetch
-) -> dict[str, str]:
+def _search[T](
+    papers: Sequence[Paper], value: Callable[[dict[str, Any]], T], fetch: Fetch
+) -> dict[str, T]:
     """One search request, results mapped back onto work_ids by pmcid then doi.
 
-    `value` pulls the field wanted out of a result; empty values are dropped so the
-    caller can tell "EPMC has no such field for this paper" from a stored blank.
+    `value` pulls the field wanted out of a result; empty values (blank string, empty
+    list) are dropped so the caller can tell "EPMC has no such field for this paper"
+    from a stored blank.
     """
     terms = [t for t in (_term(p) for p in papers) if t]
     if not terms:
@@ -64,9 +65,9 @@ def _search(
     results = (fetch(_url(terms)).get("resultList") or {}).get("result") or []
     by_pmcid = {p.pmcid.upper(): p.work_id for p in papers if p.pmcid}
     by_doi = {p.doi.lower(): p.work_id for p in papers if p.doi}
-    out: dict[str, str] = {}
+    out: dict[str, T] = {}
     for r in results:
-        got = value(r).strip()
+        got = value(r)
         if not got:
             continue
         pmcid = str(r.get("pmcid") or "").upper()
@@ -91,7 +92,28 @@ def fetch_venues(papers: Sequence[Paper], fetch: Fetch = get_json) -> dict[str, 
 
 
 def _journal(r: dict[str, Any]) -> str:
-    return str(((r.get("journalInfo") or {}).get("journal") or {}).get("title") or "")
+    return str(((r.get("journalInfo") or {}).get("journal") or {}).get("title") or "").strip()
+
+
+def fetch_authors(papers: Sequence[Paper], fetch: Fetch = get_json) -> dict[str, list[str]]:
+    """Author names, batched. EPMC gives initials form ("Murray JK"), OpenAlex full names."""
+    out: dict[str, list[str]] = {}
+    for start in range(0, len(papers), BATCH):
+        out.update(_search(papers[start : start + BATCH], _authors, fetch))
+    return out
+
+
+def _authors(r: dict[str, Any]) -> list[str]:
+    """authorList when EPMC has structured names, else its comma-joined authorString."""
+    listed = [
+        str(a.get("fullName") or "").strip()
+        for a in ((r.get("authorList") or {}).get("author") or [])
+    ]
+    names = [n for n in listed if n]
+    if names:
+        return names
+    raw = str(r.get("authorString") or "").strip().rstrip(".")
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def fetch_retracted(papers: Sequence[Paper], fetch: Fetch = get_json) -> set[str]:

@@ -43,6 +43,11 @@ WORK_COLUMNS = {
     # 'openalex' | 'epmc' | 'missing' — 'missing' is a closed-out row, not a retry.
     "venue": "TEXT",
     "venue_source": "TEXT",
+    # The author names the client's card renders. The crawler stored the publisher's own
+    # string for EPMC-discovered works and nothing at all for OpenAlex/citation ones, so
+    # authors.py rehydrates the empty ones as a JSON array. authors_source is
+    # 'openalex' | 'epmc' | 'missing' — 'missing' is a closed-out row, not a retry.
+    "authors_source": "TEXT",
     # When retraction.py last asked OpenAlex and Europe PMC whether this work was
     # retracted. Stamped whether or not it was, so the re-check is a resumable no-op;
     # a retracted work also has its status flipped, which is what keeps it out of bundles.

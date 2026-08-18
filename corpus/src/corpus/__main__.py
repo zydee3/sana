@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from . import (
+    authors,
     backfill,
     bundle,
     chunk,
@@ -541,6 +542,16 @@ def cmd_venue(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_authors(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    authors.run(conn, _log, args.limit)
+    rows = conn.execute(
+        "SELECT authors_source, count(*) FROM works WHERE authors_source IS NOT NULL GROUP BY 1"
+    ).fetchall()
+    _log(f"rehydrated authors by source: {dict(rows)}")
+    return 0
+
+
 def cmd_retractions(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -762,6 +773,10 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("venue", help="rehydrate journal names for the shippable pool")
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
     s.set_defaults(func=cmd_venue)
+
+    s = sub.add_parser("authors", help="rehydrate author names for the shippable pool")
+    s.add_argument("--limit", type=int, default=None, help="cap works this run")
+    s.set_defaults(func=cmd_authors)
 
     s = sub.add_parser("retractions", help="re-check the shippable pool for retractions")
     s.add_argument("--limit", type=int, default=None, help="cap works this run")
