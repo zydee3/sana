@@ -466,3 +466,66 @@ def audit(conn: sqlite3.Connection, out_dir: Path) -> dict[str, Any]:
         "uncovered": ledger_uncovered,
         "problems": problems,
     }
+
+
+def history(out_dir: Path) -> list[str]:
+    """Payload digests of every published pair on disk, oldest first.
+
+    A publish overwrites `latest.json`, so the only record of earlier bundles is the
+    content-addressed payloads themselves; both halves of a pair carry the same digest,
+    and mtime is what orders them.
+    """
+    pairs = [
+        (path.stat().st_mtime, path.name[len("works-") : -len(".jsonl.zst")])
+        for path in out_dir.glob("works-*.jsonl.zst")
+    ]
+    return [d for _, d in sorted(pairs) if (out_dir / f"findings-{d}.jsonl.zst").exists()]
+
+
+def read_pair(out_dir: Path, content: str) -> dict[str, list[dict[str, Any]]]:
+    """The rows of one published pair, by kind — for bundles the manifest no longer names."""
+    decompressor = zstandard.ZstdDecompressor()
+    return {
+        kind: [
+            json.loads(line)
+            for line in decompressor.decompress(
+                (out_dir / f"{kind}-{content}.jsonl.zst").read_bytes()
+            ).splitlines()
+        ]
+        for kind in ("works", "findings")
+    }
+
+
+def diff(out_dir: Path, before: str, after: str) -> dict[str, Any]:
+    """What a client that has applied `before` sees when it applies `after`.
+
+    The contract's two hardest rules are properties of a *pair* of bundles, so no check
+    inside one bundle can see them: ids must stay stable across versions (a carried-over
+    row whose fields moved is what the client re-embeds and re-renders under a citation
+    it has already persisted), and a row can only be withdrawn by a tombstone (dropping
+    it from the payload leaves it in the client's DB forever, which is the one outcome
+    that is unrecoverable).
+    """
+    a, b = read_pair(out_dir, before), read_pair(out_dir, after)
+    kinds: dict[str, Any] = {}
+    problems: list[str] = []
+    for kind, key in (("works", "work_id"), ("findings", "finding_id")):
+        old = {r[key]: r for r in split(a[kind])[0]}
+        new_live, new_dead = split(b[kind])
+        new = {r[key]: r for r in new_live}
+        buried = {r[key] for r in new_dead}
+        carried = sorted(set(old) & set(new))
+        changed: dict[str, int] = {}
+        for row_id in carried:
+            for field in sorted(f for f in new[row_id] if new[row_id][f] != old[row_id].get(f)):
+                changed[field] = changed.get(field, 0) + 1
+        vanished = sorted(set(old) - set(new) - buried)
+        kinds[kind] = {
+            "added": len(set(new) - set(old)),
+            "carried": len(carried),
+            "tombstoned": len(set(old) & buried),
+            "vanished": len(vanished),
+            "changed_fields": changed,
+        }
+        problems += [f"{key} {row_id} left the bundle with no tombstone" for row_id in vanished]
+    return {"before": before, "after": after, "kinds": kinds, "problems": problems}

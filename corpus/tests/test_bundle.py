@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
+import zstandard
 
 from corpus import bundle, db
 
@@ -358,3 +360,81 @@ def test_audit_catches_a_shipped_id_that_is_neither_live_nor_tombstoned(tmp_path
     conn.commit()
     problems = bundle.audit(conn, out)["problems"]
     assert problems == ["finding f_gone shipped once but is neither live nor tombstoned"]
+
+
+def _content(manifest: dict[str, object]) -> str:
+    files = manifest["files"]
+    assert isinstance(files, dict)
+    return str(files["works"])[len("works-") : -len(".jsonl.zst")]
+
+
+def test_diff_reports_what_a_client_applies_between_two_bundles(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    models = _models_dir(tmp_path)
+    first = bundle.publish(conn, out, NOW, models_dir=models)
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    conn.execute("UPDATE works SET title='a corrected title' WHERE work_id='W1'")
+    conn.commit()
+    second = bundle.publish(conn, out, "2026-09-01T00:00Z", models_dir=models)
+
+    report = bundle.diff(out, _content(first.manifest), _content(second.manifest))
+    assert report["problems"] == []
+    works = report["kinds"]["works"]
+    assert works["added"] == 1 and works["carried"] == 1 and works["vanished"] == 0
+    assert works["changed_fields"] == {"title": 1}
+    findings = report["kinds"]["findings"]
+    assert findings["added"] == 1 and findings["changed_fields"] == {}
+
+
+def test_diff_counts_a_retraction_as_tombstoned_not_vanished(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    models = _models_dir(tmp_path)
+    first = bundle.publish(conn, out, NOW, models_dir=models)
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    conn.execute("UPDATE works SET status='retracted' WHERE work_id='W1'")
+    conn.commit()
+    second = bundle.publish(conn, out, "2026-09-01T00:00Z", models_dir=models)
+
+    report = bundle.diff(out, _content(first.manifest), _content(second.manifest))
+    assert report["problems"] == []
+    assert report["kinds"]["works"]["tombstoned"] == 1
+    assert report["kinds"]["works"]["vanished"] == 0
+    assert report["kinds"]["findings"]["tombstoned"] == 2
+
+
+def test_diff_flags_a_row_that_left_without_a_tombstone(tmp_path: Path) -> None:
+    """The unrecoverable case: the client keeps a dropped row in its DB forever."""
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    models = _models_dir(tmp_path)
+    first = bundle.publish(conn, out, NOW, models_dir=models)
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    second = bundle.publish(conn, out, "2026-09-01T00:00Z", models_dir=models)
+    # Rewrite the second payload as if W1 had simply been dropped from the works file.
+    rows = [w for w in _rows(out, second.manifest, "works") if w["work_id"] != "W1"]
+    name = str(second.manifest["files"]["works"])
+    (out / name).write_bytes(zstandard.ZstdCompressor().compress(bundle.jsonl(rows)))
+
+    report = bundle.diff(out, _content(first.manifest), _content(second.manifest))
+    assert report["kinds"]["works"]["vanished"] == 1
+    assert report["problems"] == ["work_id W1 left the bundle with no tombstone"]
+
+
+def test_history_orders_published_pairs_oldest_first(tmp_path: Path) -> None:
+    conn = _populated(tmp_path)
+    out = tmp_path / "bundles"
+    models = _models_dir(tmp_path)
+    first = bundle.publish(conn, out, NOW, models_dir=models)
+    _work(conn, "W2")
+    _finding(conn, "f_c", "W2")
+    second = bundle.publish(conn, out, "2026-09-01T00:00Z", models_dir=models)
+    for name in ("works", "findings"):
+        os.utime(out / str(first.manifest["files"][name]), (1000, 1000))
+        os.utime(out / str(second.manifest["files"][name]), (2000, 2000))
+
+    assert bundle.history(out) == [_content(first.manifest), _content(second.manifest)]

@@ -619,6 +619,31 @@ def cmd_bundle_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bundle_diff(args: argparse.Namespace) -> int:
+    published = bundle.history(args.out)
+    if len(published) < 2:
+        _log(f"{len(published)} published pairs in {args.out}: nothing to diff")
+        return 0
+    consecutive = list(zip(published[:-1], published[1:], strict=True))
+    pairs = consecutive if args.all else consecutive[-1:]
+    problems = 0
+    for before, after in pairs:
+        report = bundle.diff(args.out, before, after)
+        _log(f"{before} -> {after}")
+        for kind in ("works", "findings"):
+            k = report["kinds"][kind]
+            moved = ", ".join(f"{f} x{n}" for f, n in sorted(k["changed_fields"].items()))
+            _log(
+                f"  {kind}: +{k['added']} carried={k['carried']} "
+                f"tombstoned={k['tombstoned']} vanished={k['vanished']}"
+            )
+            _log(f"    fields moved on carried rows: {moved or 'none'}")
+        for problem in report["problems"]:
+            _log(f"  PROBLEM {problem}")
+        problems += len(report["problems"])
+    return 1 if problems else 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     a, b = _read_verdicts(args.a), _read_verdicts(args.b)
     ag = compare.agreement(a, b, args.threshold)
@@ -836,6 +861,11 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("bundle-audit", help="check the published bundle against corpus.db")
     s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)
     s.set_defaults(func=cmd_bundle_audit)
+
+    s = sub.add_parser("bundle-diff", help="what a client applying one bundle then the next sees")
+    s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)
+    s.add_argument("--all", action="store_true", help="every consecutive pair, not just the last")
+    s.set_defaults(func=cmd_bundle_diff)
 
     s = sub.add_parser("compare", help="agreement between two classify runs")
     s.add_argument("--a", type=Path, required=True)
