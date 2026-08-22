@@ -42,6 +42,7 @@ class EvalRow:
     backend: str
     params: str
     n: int
+    k: int
     queries: int
     p_at_k: float
     p_at_3: float
@@ -51,7 +52,7 @@ class EvalRow:
     def line(self) -> str:
         return (
             f"{self.backend:<12} {self.params:<28} n={self.n:<8} "
-            f"P@10 {self.p_at_k:.3f}  P@3 {self.p_at_3:.3f}  "
+            f"P@{self.k} {self.p_at_k:.3f}  P@3 {self.p_at_3:.3f}  "
             f"hit@3 {self.hit_at_3}/{self.queries}  unjudged {self.unjudged}"
         )
 
@@ -100,6 +101,7 @@ def score_hits(
         backend=backend,
         params=params,
         n=n,
+        k=k,
         queries=int(metrics["queries"]),
         p_at_k=metrics["p_at_k"],
         p_at_3=metrics["p_at_3"],

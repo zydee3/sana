@@ -21,6 +21,7 @@ from . import (
     backfill,
     bundle,
     chunk,
+    clienteval,
     compare,
     db,
     distill,
@@ -644,6 +645,28 @@ def cmd_bundle_diff(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
+def cmd_bundle_eval(args: argparse.Namespace) -> int:
+    bundle_id, cards = clienteval.load_cards(args.out)
+    queries = _read_queries(args.queries)
+    spec = embed.MODELS[args.model]
+    _log(f"{bundle_id}: {len(cards)} claims ({spec.name}), {len(queries)} golden queries")
+    hits = clienteval.rank(cards, queries, spec, k=args.k, workers=args.workers)
+    judgments = clienteval.load_judgments(args.judgments) if args.judgments else {}
+    row, missing = evaluate.score_hits(
+        [[fid for fid, _ in ranked] for ranked in hits],
+        judgments,
+        backend="claims",
+        params=spec.name,
+        n=len(cards),
+        k=args.k,
+    )
+    _log(row.line())
+    if args.dump:
+        n = clienteval.dump(hits, cards, args.dump, judgments=judgments)
+        _log(f"  {n} hits -> {args.dump} ({len(missing)} still unjudged)")
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     a, b = _read_verdicts(args.a), _read_verdicts(args.b)
     ag = compare.agreement(a, b, args.threshold)
@@ -866,6 +889,16 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)
     s.add_argument("--all", action="store_true", help="every consecutive pair, not just the last")
     s.set_defaults(func=cmd_bundle_diff)
+
+    s = sub.add_parser("bundle-eval", help="P@k of the published claims on the golden queries")
+    s.add_argument("--out", type=Path, default=bundle.DEFAULT_OUT)
+    s.add_argument("--queries", type=Path, required=True, help="one query per line")
+    s.add_argument("--judgments", type=Path, default=None, help="(query_idx, finding_id, 0|1)")
+    s.add_argument("--dump", type=Path, default=None, help="write the hits as a judgeable tsv")
+    s.add_argument("--model", default="minilm-int8", choices=sorted(embed.MODELS))
+    s.add_argument("--k", type=int, default=5)
+    s.add_argument("--workers", type=int, default=8)
+    s.set_defaults(func=cmd_bundle_eval)
 
     s = sub.add_parser("compare", help="agreement between two classify runs")
     s.add_argument("--a", type=Path, required=True)
