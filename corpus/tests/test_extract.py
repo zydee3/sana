@@ -243,6 +243,24 @@ def test_run_leaves_a_failed_batch_pending_and_brakes() -> None:
     assert len(extract.pending_ids(conn)) == 6
 
 
+def test_run_logs_the_reason_for_an_isolated_failed_batch() -> None:
+    """One failure in a run never reaches the brake's log line, so it logs its own."""
+    conn = _conn()
+    for i in range(2):
+        _store_work(conn, _work(f"W{i}"))
+    lines: list[str] = []
+
+    def runner(prompt: str, model: str) -> tuple[str, Usage]:
+        if "W0" in prompt:
+            raise ExtractError("reply is not JSON: 'nope'")
+        return json.dumps([{"paper": 1, "findings": [_raw()]}]), Usage(1000, 50, 0, 0.01, 1.0)
+
+    done, failed, _ = extract.run(conn, lines.append, runner=runner, workers=1)
+    assert (done, failed) == (1, 1)
+    assert [line for line in lines if "W0" in line and "not JSON" in line]
+    assert extract.pending_ids(conn) == ["W0"]
+
+
 def test_run_sleeps_off_a_quota_refusal_instead_of_braking() -> None:
     """A refused window is a wait: the same works are retried after the reset, not lost."""
     conn = _conn()

@@ -553,6 +553,9 @@ def run(
                     failed += len(works)
                     streak += 1
                     last_error = error
+                    # A lone failure never reaches the brake's log line, and the run never
+                    # retries it: without this the work is unstamped for an unknown reason.
+                    log(f"  batch of {len(works)} failed at {works[0].work_id}: {error}")
                     continue
                 streak = 0
                 done += len(results)
